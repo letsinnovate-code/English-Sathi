@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # English Sathi 🚀
 
 English Sathi is a comprehensive AI-powered English learning platform built as a high-performance monorepo.
@@ -59,3 +60,6 @@ npm run dev --workspace=@english-sathi/web
 npm run dev --workspace=@english-sathi/api
 ```
 
+=======
+# English-Sathi
+>>>>>>> c71c4ad619d71301f8ac2fc53331032f514cd9e6
