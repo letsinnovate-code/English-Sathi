@@ -1,0 +1,72 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  STUDENT
+  TEACHER
+  ADMIN
+}
+
+enum EnglishLevel {
+  BEGINNER
+  ELEMENTARY
+  INTERMEDIATE
+  UPPER_INTERMEDIATE
+  ADVANCED
+}
+
+model User {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  name         String?
+  role         Role          @default(STUDENT)
+  level        EnglishLevel  @default(BEGINNER)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  sessions     PracticeSession[]
+  progress     Progress[]
+}
+
+model Lesson {
+  id          String        @id @default(uuid())
+  title       String
+  description String?
+  level       EnglishLevel
+  category    String
+  content     Json
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  progress    Progress[]
+}
+
+model PracticeSession {
+  id          String        @id @default(uuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topic       String
+  transcript  Json?
+  feedback    Json?
+  score       Float?
+  startedAt   DateTime      @default(now())
+  endedAt     DateTime?
+}
+
+model Progress {
+  id          String        @id @default(uuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId    String
+  lesson      Lesson        @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  completed   Boolean       @default(false)
+  score       Float?
+  updatedAt   DateTime      @updatedAt
+
+  @@unique([userId, lessonId])
+}
+

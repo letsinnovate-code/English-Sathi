@@ -1,0 +1,24 @@
+{
+  "name": "@english-sathi/workers",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@english-sathi/ai": "*",
+    "@english-sathi/database": "*",
+    "@english-sathi/shared-types": "*",
+    "bullmq": "^5.41.0",
+    "ioredis": "^5.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
+
