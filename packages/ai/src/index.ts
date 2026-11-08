@@ -1,6 +1,6 @@
 export * from "./schemas/tutor-response.schema";
-export * from "./schemas/tutor-response.schema";
 export * from "./prompts/tutor.prompt";
+export * from "./services/tutor.service";
 import { GoogleGenAI } from "@google/genai";
 import type { EnglishLevel, GrammarCorrection, ConversationMessage } from "@english-sathi/shared-types";
 
