@@ -1,3 +1,4 @@
+import { randomBytes, scryptSync } from "node:crypto";
 import {
   PrismaClient,
   ProficiencyLevel,
@@ -7,6 +8,16 @@ import {
 } from "../src";
 
 const prisma = new PrismaClient();
+
+function hashSeedPassword(plainPassword: string): string {
+  const salt = randomBytes(16).toString("hex");
+  const derivedKey = scryptSync(plainPassword, salt, 64, {
+    N: 16384,
+    r: 8,
+    p: 1,
+  }).toString("hex");
+  return `scrypt$${salt}$${derivedKey}`;
+}
 
 async function main() {
   console.log("Seeding English Sathi database...");
@@ -93,12 +104,32 @@ async function main() {
     },
   });
 
+  const isNonProd = process.env.NODE_ENV !== "production";
+  const seededOnboardingAt = new Date("2026-01-01T00:00:00.000Z");
+
   // 2. Seed Demo Student & Profile
+  const existingStudent = await prisma.user.findUnique({
+    where: { email: "student@englishsathi.com" },
+    select: { passwordHash: true },
+  });
+  const studentPasswordHash =
+    isNonProd && !existingStudent?.passwordHash
+      ? hashSeedPassword(process.env.SEED_DEMO_PASSWORD || "Student@123!")
+      : undefined;
+
   const demoStudent = await prisma.user.upsert({
     where: { email: "student@englishsathi.com" },
-    update: {},
+    update: {
+      ...(studentPasswordHash ? { passwordHash: studentPasswordHash } : {}),
+      profile: {
+        update: {
+          onboardingCompletedAt: seededOnboardingAt,
+        },
+      },
+    },
     create: {
       email: "student@englishsathi.com",
+      ...(studentPasswordHash ? { passwordHash: studentPasswordHash } : {}),
       role: UserRole.STUDENT,
       profile: {
         create: {
@@ -114,6 +145,7 @@ async function main() {
             LearningGoal.CONFIDENCE,
           ],
           timezone: "Asia/Kolkata",
+          onboardingCompletedAt: seededOnboardingAt,
         },
       },
       subscription: {
@@ -127,11 +159,28 @@ async function main() {
   });
 
   // 3. Seed Demo Admin
+  const existingAdmin = await prisma.user.findUnique({
+    where: { email: "admin@englishsathi.com" },
+    select: { passwordHash: true },
+  });
+  const adminPasswordHash =
+    isNonProd && !existingAdmin?.passwordHash
+      ? hashSeedPassword(process.env.SEED_ADMIN_PASSWORD || "Admin@123!")
+      : undefined;
+
   await prisma.user.upsert({
     where: { email: "admin@englishsathi.com" },
-    update: {},
+    update: {
+      ...(adminPasswordHash ? { passwordHash: adminPasswordHash } : {}),
+      profile: {
+        update: {
+          onboardingCompletedAt: seededOnboardingAt,
+        },
+      },
+    },
     create: {
       email: "admin@englishsathi.com",
+      ...(adminPasswordHash ? { passwordHash: adminPasswordHash } : {}),
       role: UserRole.ADMIN,
       profile: {
         create: {
@@ -144,6 +193,7 @@ async function main() {
           speakingSpeed: "NORMAL",
           learningGoals: [LearningGoal.BUSINESS_ENGLISH],
           timezone: "Asia/Kolkata",
+          onboardingCompletedAt: seededOnboardingAt,
         },
       },
     },

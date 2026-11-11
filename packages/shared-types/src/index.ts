@@ -9,13 +9,90 @@ export type ProficiencyLevel =
 
 export type UserRole = "STUDENT" | "ADMIN";
 
-export interface UserProfile {
+export type LearningGoal =
+  | "DAILY_CONVERSATION"
+  | "JOB_INTERVIEW"
+  | "BUSINESS_ENGLISH"
+  | "TRAVEL"
+  | "ACADEMIC"
+  | "CONFIDENCE";
+
+export type SpeakingSpeed = "SLOW" | "NORMAL" | "FAST";
+
+export type SubscriptionStatus =
+  | "TRIALING"
+  | "ACTIVE"
+  | "PAST_DUE"
+  | "CANCELLED"
+  | "EXPIRED";
+
+export interface AuthUserDTO {
   id: string;
   email: string;
-  name?: string;
   role: UserRole;
-  level: ProficiencyLevel;
+  emailVerifiedAt: string | null;
   createdAt: string;
+}
+
+export interface UserProfileDTO {
+  id: string;
+  userId: string;
+  displayName: string;
+  nativeLanguage: string;
+  targetLanguage: string;
+  explanationLanguage: string;
+  proficiencyLevel: ProficiencyLevel;
+  dailyGoalMinutes: number;
+  speakingSpeed: SpeakingSpeed;
+  learningGoals: LearningGoal[];
+  timezone: string;
+  onboardingCompletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuthTokensDTO {
+  accessToken: string;
+  refreshToken: string;
+  expiresInSeconds: number;
+  tokenType: "Bearer";
+}
+
+export interface AuthSessionResponseDTO {
+  user: AuthUserDTO;
+  profile: UserProfileDTO;
+  onboardingRequired: boolean;
+  tokens: AuthTokensDTO;
+}
+
+export interface SubscriptionSummaryDTO {
+  planName: string;
+  status: SubscriptionStatus;
+  dailyVoiceLimitSeconds: number;
+  usedVoiceSecondsToday: number;
+  remainingVoiceSecondsToday: number;
+}
+
+export interface StarterLessonSummaryDTO {
+  id: string;
+  slug: string;
+  title: string;
+  description: string | null;
+  level: ProficiencyLevel;
+  category: string;
+}
+
+export interface DashboardSummaryDTO {
+  user: AuthUserDTO;
+  profile: UserProfileDTO;
+  onboardingRequired: boolean;
+  dailyGoal: {
+    targetMinutes: number;
+    completedMinutesToday: number;
+    progressPercent: number;
+  };
+  subscription: SubscriptionSummaryDTO | null;
+  recommendedLessons: StarterLessonSummaryDTO[];
 }
 
 export interface ConversationMessage {
@@ -49,4 +126,3 @@ export interface ApiResponse<T> {
   error?: string;
   message?: string;
 }
-

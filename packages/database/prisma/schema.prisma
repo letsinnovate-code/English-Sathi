@@ -86,19 +86,20 @@ model User {
 }
 
 model UserProfile {
-  id                  String           @id @default(uuid()) @db.Uuid
-  userId              String           @unique @db.Uuid
-  displayName         String
-  nativeLanguage      String           @default("hi")
-  targetLanguage      String           @default("en")
-  explanationLanguage String           @default("hi")
-  proficiencyLevel    ProficiencyLevel @default(UNKNOWN)
-  dailyGoalMinutes    Int              @default(15)
-  speakingSpeed       String           @default("NORMAL")
-  learningGoals       LearningGoal[]
-  timezone            String           @default("Asia/Kolkata")
-  createdAt           DateTime         @default(now())
-  updatedAt           DateTime         @updatedAt
+  id                    String           @id @default(uuid()) @db.Uuid
+  userId                String           @unique @db.Uuid
+  displayName           String
+  nativeLanguage        String           @default("hi")
+  targetLanguage        String           @default("en")
+  explanationLanguage   String           @default("hi")
+  proficiencyLevel      ProficiencyLevel @default(UNKNOWN)
+  dailyGoalMinutes      Int              @default(15)
+  speakingSpeed         String           @default("NORMAL")
+  learningGoals         LearningGoal[]
+  timezone              String           @default("Asia/Kolkata")
+  onboardingCompletedAt DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
