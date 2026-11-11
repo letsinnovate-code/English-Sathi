@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import type { EnglishLevel, ConversationMessage } from "@english-sathi/shared-types";
+import type { ProficiencyLevel, ConversationMessage } from "@english-sathi/shared-types";
 import {
     TutorTurnResponseSchema,
     type TutorTurnResponse,
@@ -9,7 +9,7 @@ import { buildTutorSystemPrompt, type TutorPromptOptions } from "../prompts/tuto
 
 export interface GenerateTurnParams {
     userMessage: string;
-    learnerLevel: EnglishLevel;
+    learnerLevel: ProficiencyLevel;
     topic: string;
     history?: ConversationMessage[];
     nativeLanguage?: string;

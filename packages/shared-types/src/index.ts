@@ -1,18 +1,20 @@
-export type EnglishLevel =
-  | "BEGINNER"
-  | "ELEMENTARY"
-  | "INTERMEDIATE"
-  | "UPPER_INTERMEDIATE"
-  | "ADVANCED";
+export type ProficiencyLevel =
+  | "A1"
+  | "A2"
+  | "B1"
+  | "B2"
+  | "C1"
+  | "C2"
+  | "UNKNOWN";
 
-export type UserRole = "STUDENT" | "TEACHER" | "ADMIN";
+export type UserRole = "STUDENT" | "ADMIN";
 
 export interface UserProfile {
   id: string;
   email: string;
   name?: string;
   role: UserRole;
-  level: EnglishLevel;
+  level: ProficiencyLevel;
   createdAt: string;
 }
 

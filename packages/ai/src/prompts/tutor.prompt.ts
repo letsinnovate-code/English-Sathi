@@ -1,7 +1,7 @@
-import type { EnglishLevel } from "@english-sathi/shared-types";
+import type { ProficiencyLevel } from "@english-sathi/shared-types";
 
 export interface TutorPromptOptions {
-  learnerLevel: EnglishLevel;
+  learnerLevel: ProficiencyLevel;
   topic: string;
   nativeLanguage?: "hindi" | "english" | string;
   learnerName?: string;
@@ -11,10 +11,11 @@ export interface TutorPromptOptions {
 /**
  * Returns level-specific teaching guidelines according to CEFR standards.
  */
-function getLevelGuidelines(level: EnglishLevel): string {
+function getLevelGuidelines(level: ProficiencyLevel): string {
   switch (level) {
-    case "BEGINNER":
-    case "ELEMENTARY":
+    case "A1":
+    case "A2":
+    case "UNKNOWN":
       return `
 LEVEL: BEGINNER / ELEMENTARY (CEFR A1-A2)
 - Vocabulary: Use basic, everyday English words. Keep sentences short (under 12 words).
@@ -22,7 +23,8 @@ LEVEL: BEGINNER / ELEMENTARY (CEFR A1-A2)
 - Tone: Extremely warm, patient, and non-intimidating. Celebrate every attempt.
 - Bilingual Hint: If the learner makes a conceptual mistake, provide a short Hindi explanation in 'hindiExplanation' to clarify the logic.`;
 
-    case "INTERMEDIATE":
+    case "B1":
+    case "B2":
       return `
 LEVEL: INTERMEDIATE (CEFR B1-B2)
 - Vocabulary: Natural conversational English, common idioms, and phrasal verbs.
@@ -30,8 +32,8 @@ LEVEL: INTERMEDIATE (CEFR B1-B2)
 - Tone: Friendly conversation partner who challenges the user to express complex thoughts.
 - Bilingual Hint: Provide explanations in English. Use Hindi only if a grammar rule has direct mother-tongue interference.`;
 
-    case "UPPER_INTERMEDIATE":
-    case "ADVANCED":
+    case "C1":
+    case "C2":
       return `
 LEVEL: ADVANCED (CEFR C1-C2)
 - Vocabulary: Sophisticated, precise vocabulary and diverse sentence structures.
@@ -49,6 +51,9 @@ LEVEL: ADVANCED (CEFR C1-C2)
  */
 export function buildTutorSystemPrompt(options: TutorPromptOptions): string {
   const isHindiSpeaker = (options.nativeLanguage || "hindi").toLowerCase() === "hindi";
+  const needsHindiScaffolding =
+    isHindiSpeaker &&
+    (options.learnerLevel === "A1" || options.learnerLevel === "A2" || options.learnerLevel === "UNKNOWN");
   const nameGreeting = options.learnerName ? `The learner's name is ${options.learnerName}.` : "";
   const recurringNotes =
     options.recurringMistakes && options.recurringMistakes.length > 0
@@ -70,7 +75,7 @@ PEDAGOGICAL TEACHING RULES:
 4. CORRECTIONS:
    - Categorize each issue strictly into: 'grammar', 'vocabulary', 'pronunciation_hint', or 'natural_expression'.
    - In 'explanation', explain WHY in simple, non-judgmental language.
-   ${isHindiSpeaker && (options.learnerLevel === "BEGINNER" || options.learnerLevel === "ELEMENTARY") ? "- Include 'hindiExplanation' explaining the concept in Romanized Hindi / Hinglish for clarity." : ""}
+   ${needsHindiScaffolding ? "- Include 'hindiExplanation' explaining the concept in Romanized Hindi / Hinglish for clarity." : ""}
 5. SCORING: Calibrate 'score' (0-100) realistic to their CEFR level (e.g. 80-95 for understandable effort with minor slips, 60-75 for major errors).
 
 OUTPUT FORMAT:

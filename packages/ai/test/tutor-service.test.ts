@@ -9,7 +9,7 @@ describe("EnglishSathiAI Service", () => {
 
         const response = await engine.generateTurnResponse({
             userMessage: "I like spending time with family and reading books.",
-            learnerLevel: "BEGINNER",
+            learnerLevel: "A1",
             topic: "Hobbies & Daily Life",
         });
 
@@ -29,7 +29,7 @@ describe("EnglishSathiAI Service", () => {
 
         const response = await engine.generateTurnResponse({
             userMessage: "I am agree with your opinion on this topic.",
-            learnerLevel: "BEGINNER",
+            learnerLevel: "A1",
             topic: "Daily Conversations",
             nativeLanguage: "hindi",
         });
@@ -47,7 +47,7 @@ describe("EnglishSathiAI Service", () => {
 
         const response = await engine.generateTurnResponse({
             userMessage: "Yesterday I went to the market with my cousin sister.",
-            learnerLevel: "ELEMENTARY",
+            learnerLevel: "A2",
             topic: "Shopping",
         });
 
@@ -61,7 +61,7 @@ describe("EnglishSathiAI Service", () => {
 
         const response = await engine.generateTurnResponse({
             userMessage: "My brother he go to college every morning.",
-            learnerLevel: "BEGINNER",
+            learnerLevel: "A1",
             topic: "Family",
         });
 

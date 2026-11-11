@@ -1,12 +1,12 @@
 import { Controller, Get } from "@nestjs/common";
-import { HealthService, type HealthReport } from "./health.service";
+import { HealthService, type HealthReport, type ReadinessReport } from "./health.service";
 
 @Controller("health")
 export class HealthController {
     constructor(private readonly healthService: HealthService) { }
 
     @Get()
-    getHealth(): HealthReport {
+    async getHealth(): Promise<HealthReport> {
         return this.healthService.getDetailedHealth();
     }
 
@@ -16,7 +16,7 @@ export class HealthController {
     }
 
     @Get("readiness")
-    getReadiness(): { status: "ok"; ready: boolean } {
+    async getReadiness(): Promise<ReadinessReport> {
         return this.healthService.getReadiness();
     }
 }

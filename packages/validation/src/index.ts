@@ -1,17 +1,18 @@
 import { z } from "zod";
 
-export const EnglishLevelSchema = z.enum([
-  "BEGINNER",
-  "ELEMENTARY",
-  "INTERMEDIATE",
-  "UPPER_INTERMEDIATE",
-  "ADVANCED",
+export const ProficiencyLevelSchema = z.enum([
+  "A1",
+  "A2",
+  "B1",
+  "B2",
+  "C1",
+  "C2",
+  "UNKNOWN",
 ]);
 
 export const StartSessionSchema = z.object({
-  userId: z.string().uuid(),
   topic: z.string().min(2).max(100),
-  targetLevel: EnglishLevelSchema.default("BEGINNER"),
+  targetLevel: ProficiencyLevelSchema.default("A1"),
 });
 
 export const SendMessageSchema = z.object({
@@ -23,9 +24,10 @@ export const SendMessageSchema = z.object({
 export const RegisterUserSchema = z.object({
   email: z.string().email(),
   name: z.string().min(2).max(50),
-  level: EnglishLevelSchema.default("BEGINNER"),
+  level: ProficiencyLevelSchema.default("A1"),
 });
 
+export type ProficiencyLevelInput = z.infer<typeof ProficiencyLevelSchema>;
 export type StartSessionInput = z.infer<typeof StartSessionSchema>;
 export type SendMessageInput = z.infer<typeof SendMessageSchema>;
 export type RegisterUserInput = z.infer<typeof RegisterUserSchema>;
