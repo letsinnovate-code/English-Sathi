@@ -1,21 +1,18 @@
 import type { Metadata } from "next";
+import "./globals.css";
+import { AuthProvider } from "@/context/auth-context";
 
 export const metadata: Metadata = {
-  title: "English Sathi - AI English Learning",
-  description: "Learn English with your AI conversation partner",
+  title: "English Sathi – AI English Learning",
+  description: "Practice spoken English with your personal AI tutor, anytime.",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body style={{ margin: 0, fontFamily: "system-ui, -apple-system, sans-serif" }}>
-        {children}
+      <body>
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );
 }
-
