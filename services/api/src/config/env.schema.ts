@@ -19,6 +19,12 @@ export const EnvSchema = z.object({
         .min(16, "JWT_SECRET must be at least 16 characters for security")
         .default("dev_super_secret_jwt_key_at_least_16_chars"),
     JWT_EXPIRES_IN: z.string().default("7d"),
+    REFRESH_TOKEN_SECRET: z
+        .string()
+        .min(16, "REFRESH_TOKEN_SECRET must be at least 16 characters")
+        .default("dev_refresh_token_secret_at_least_16_chars"),
+    REFRESH_TOKEN_EXPIRES_IN: z.string().default("30d"),
+    BCRYPT_ROUNDS: z.coerce.number().int().min(10).max(14).default(12),
     GEMINI_API_KEY: z.string().optional(),
 });
 
