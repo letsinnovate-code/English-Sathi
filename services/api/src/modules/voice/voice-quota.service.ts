@@ -130,8 +130,10 @@ export class VoiceQuotaService {
     if (existingOpen) {
       throw new ConflictException({
         message: "You already have an active voice session in progress.",
-        code: "CONCURRENT_SESSION",
-        activeSessionId: existingOpen.id,
+        details: {
+          code: "CONCURRENT_SESSION",
+          activeSessionId: existingOpen.id,
+        },
       });
     }
 

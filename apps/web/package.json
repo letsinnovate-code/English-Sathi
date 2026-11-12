@@ -14,7 +14,8 @@
     "js-cookie": "^3.0.8",
     "next": "^15.1.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "socket.io-client": "^4.8.4"
   },
   "devDependencies": {
     "@types/js-cookie": "^3.0.6",

@@ -47,6 +47,18 @@ type RequestOptions = {
   skipAuth?: boolean;
 };
 
+async function toApiError(response: Response): Promise<ApiError> {
+  const err = await response.json().catch(() => ({}));
+  const detailMsg = Array.isArray(err?.details) && err.details[0]?.message
+    ? `: ${err.details[0].message}`
+    : "";
+  return new ApiError(
+    response.status,
+    `${err?.message ?? "Request failed"}${detailMsg}`,
+    err?.details,
+  );
+}
+
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, skipAuth = false } = opts;
 
@@ -75,8 +87,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
       if (!retryResponse.ok) {
-        const err = await retryResponse.json().catch(() => ({}));
-        throw new ApiError(retryResponse.status, err?.message ?? "Request failed");
+        throw await toApiError(retryResponse);
       }
       if (retryResponse.status === 204) return undefined as T;
       return retryResponse.json() as Promise<T>;
@@ -87,11 +98,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   }
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    const detailMsg = Array.isArray(err?.details) && err.details[0]?.message
-      ? `: ${err.details[0].message}`
-      : "";
-    throw new ApiError(response.status, `${err?.message ?? "Request failed"}${detailMsg}`);
+    throw await toApiError(response);
   }
 
   if (response.status === 204) return undefined as T;
@@ -133,6 +140,7 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly details?: unknown,
   ) {
     super(message);
     this.name = "ApiError";
@@ -143,13 +151,22 @@ export class ApiError extends Error {
 
 import type {
   AuthSessionResponseDTO,
-  UserProfileDTO,
+  CreateVoiceSessionResponseDTO,
   DashboardSummaryDTO,
+  LessonDetailDTO,
+  LessonsListDTO,
+  ProficiencyLevel,
+  UserProfileDTO,
+  VoiceQuotaSummaryDTO,
+  VoiceSessionDetailDTO,
+  VoiceSessionDTO,
+  WsSessionEndedPayload,
 } from "@english-sathi/shared-types";
 import type {
-  RegisterUserInput,
+  CreateVoiceSessionInput,
   LoginInput,
   OnboardingInput,
+  RegisterUserInput,
   UpdateProfileInput,
 } from "@english-sathi/validation";
 
@@ -203,6 +220,68 @@ export async function apiUpdateProfile(dto: UpdateProfileInput): Promise<UserPro
 
 export async function apiGetDashboard(): Promise<DashboardSummaryDTO> {
   return request<DashboardSummaryDTO>("/dashboard");
+}
+
+// ─── Lessons & Voice Sessions ───────────────────────────────────────────────
+
+export async function apiListLessons(params?: {
+  level?: ProficiencyLevel;
+  category?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<LessonsListDTO> {
+  const qs = new URLSearchParams();
+  if (params?.level) qs.set("level", params.level);
+  if (params?.category) qs.set("category", params.category);
+  if (params?.page) qs.set("page", String(params.page));
+  if (params?.pageSize) qs.set("pageSize", String(params.pageSize));
+  const query = qs.toString();
+  return request<LessonsListDTO>(`/lessons${query ? `?${query}` : ""}`);
+}
+
+export async function apiGetLesson(slugOrId: string): Promise<LessonDetailDTO> {
+  return request<LessonDetailDTO>(`/lessons/${encodeURIComponent(slugOrId)}`);
+}
+
+export async function apiGetVoiceQuota(): Promise<VoiceQuotaSummaryDTO> {
+  return request<VoiceQuotaSummaryDTO>("/voice/sessions/quota");
+}
+
+export async function apiListVoiceSessions(): Promise<VoiceSessionDTO[]> {
+  return request<VoiceSessionDTO[]>("/voice/sessions");
+}
+
+export async function apiGetVoiceSession(sessionId: string): Promise<VoiceSessionDetailDTO> {
+  return request<VoiceSessionDetailDTO>(`/voice/sessions/${encodeURIComponent(sessionId)}`);
+}
+
+export async function apiCreateVoiceSession(
+  dto: CreateVoiceSessionInput,
+): Promise<CreateVoiceSessionResponseDTO> {
+  return request<CreateVoiceSessionResponseDTO>("/voice/sessions", {
+    method: "POST",
+    body: dto,
+  });
+}
+
+export async function apiEndVoiceSession(
+  sessionId: string,
+  reason: "user_ended" | "quota_exceeded" | "inactivity_timeout" | "error" = "user_ended",
+): Promise<WsSessionEndedPayload> {
+  return request<WsSessionEndedPayload>(`/voice/sessions/${encodeURIComponent(sessionId)}/end`, {
+    method: "POST",
+    body: { reason },
+  });
+}
+
+export function getApiBaseUrl(): string {
+  return API_BASE;
+}
+
+export async function ensureAccessToken(): Promise<string | null> {
+  if (_accessToken) return _accessToken;
+  const refreshed = await tryRefresh();
+  return refreshed ? _accessToken : null;
 }
 
 // ─── Token bootstrap (call on app load to restore session) ──────────────────

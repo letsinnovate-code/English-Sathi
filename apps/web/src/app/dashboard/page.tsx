@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { apiGetDashboard } from "@/lib/api";
 import { ApiError } from "@/lib/api";
 import type { DashboardSummaryDTO } from "@english-sathi/shared-types";
@@ -22,12 +23,21 @@ export default function DashboardPage() {
 
   return (
     <div>
-      <h1 style={{ fontSize: "1.5rem", fontWeight: 700, marginBottom: "0.25rem" }}>
-        Good day, {profile.displayName}! 👋
-      </h1>
-      <p style={{ color: "var(--text-muted)", marginBottom: "2rem" }}>
-        Level: <strong>{profile.proficiencyLevel}</strong> · Daily goal: <strong>{profile.dailyGoalMinutes} min</strong>
-      </p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem", flexWrap: "wrap", marginBottom: "2rem" }}>
+        <div>
+          <h1 style={{ fontSize: "1.5rem", fontWeight: 700, marginBottom: "0.25rem" }}>
+            Good day, {profile.displayName}! 👋
+          </h1>
+          <p style={{ color: "var(--text-muted)" }}>
+            Level: <strong>{profile.proficiencyLevel}</strong> · Daily goal: <strong>{profile.dailyGoalMinutes} min</strong>
+          </p>
+        </div>
+        <Link href="/practice">
+          <button type="button" className="btn btn-primary" style={{ width: "auto" }}>
+            🎙️ Start Voice Practice
+          </button>
+        </Link>
+      </div>
 
       {/* Daily goal card */}
       <section style={{ marginBottom: "2rem" }}>
@@ -79,12 +89,19 @@ export default function DashboardPage() {
         ) : (
           <div className="lesson-grid">
             {recommendedLessons.map((lesson) => (
-              <div key={lesson.id} className="lesson-card">
+              <Link
+                key={lesson.id}
+                href={`/practice?lesson=${encodeURIComponent(lesson.slug)}`}
+                className="lesson-card"
+              >
                 <div className="lesson-badge">{lesson.level}</div>
                 <div className="lesson-title">{lesson.title}</div>
                 {lesson.description && <div className="lesson-desc">{lesson.description}</div>}
-                <div className="lesson-category">📂 {lesson.category}</div>
-              </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "0.75rem" }}>
+                  <span className="lesson-category" style={{ marginTop: 0 }}>📂 {lesson.category}</span>
+                  <span style={{ fontSize: "0.82rem", fontWeight: 600, color: "var(--primary)" }}>Practice →</span>
+                </div>
+              </Link>
             ))}
           </div>
         )}

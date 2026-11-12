@@ -7,6 +7,7 @@ import Link from "next/link";
 
 const NAV_ITEMS = [
   { href: "/dashboard", icon: "🏠", label: "Dashboard" },
+  { href: "/practice", icon: "🎙️", label: "Voice Practice" },
   { href: "/dashboard/settings", icon: "⚙️", label: "Settings" },
 ];
 
@@ -51,8 +52,14 @@ function Sidebar() {
 }
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
-  const { state } = useAuth();
+  const { state, logout } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
+
+  async function handleMobileLogout() {
+    await logout();
+    router.push("/login");
+  }
 
   useEffect(() => {
     if (state.status === "unauthenticated") {
@@ -73,7 +80,34 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   return (
     <div className="dashboard-layout">
       <Sidebar />
-      <main className="main-content">{children}</main>
+      <div>
+        <header className="mobile-topbar">
+          <div className="sidebar-logo" style={{ fontSize: "1.1rem" }}>🗣️ Sathi</div>
+          <nav className="mobile-topbar-nav">
+            {NAV_ITEMS.map(({ href, icon, label }) => (
+              <Link
+                key={href}
+                href={href}
+                style={{
+                  fontWeight: pathname === href ? 700 : 500,
+                  color: pathname === href ? "var(--primary)" : "var(--text-muted)",
+                }}
+              >
+                {icon} {label}
+              </Link>
+            ))}
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ padding: "0.25rem 0.6rem", fontSize: "0.78rem" }}
+              onClick={handleMobileLogout}
+            >
+              Sign Out
+            </button>
+          </nav>
+        </header>
+        <main className="main-content">{children}</main>
+      </div>
     </div>
   );
 }
