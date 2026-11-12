@@ -42,6 +42,30 @@ describe("TutorTurnResponseSchema", () => {
         }
     });
 
+    it("should accept null score and null hindiExplanation gracefully", () => {
+        const parsed = TutorTurnResponseSchema.safeParse({
+            reply: "Welcome! Let us start practicing.",
+            feedback: [
+                {
+                    category: "vocabulary",
+                    original: "big rain",
+                    suggestion: "heavy rain",
+                    explanation: "In English, 'heavy' collocates naturally with 'rain'.",
+                    hindiExplanation: null,
+                },
+            ],
+            score: null,
+            encouragement: "Great start!",
+            suggestedFollowUpQuestion: "What is the weather like today?",
+        });
+
+        expect(parsed.success).toBe(true);
+        if (parsed.success) {
+            expect(parsed.data.score).toBeUndefined();
+            expect(parsed.data.feedback[0].hindiExplanation).toBeUndefined();
+        }
+    });
+
     it("should reject an invalid payload when required fields are missing", () => {
         const invalidPayload = {
             // reply is missing

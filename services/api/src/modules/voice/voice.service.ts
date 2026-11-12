@@ -7,6 +7,7 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
+  DEFAULT_GEMINI_MODEL,
   EnglishSathiAI,
   VoiceScenarioService,
   type LessonContext,
@@ -73,11 +74,12 @@ export class VoiceService {
     private readonly quotaService: VoiceQuotaService,
   ) {
     const geminiKey = this.config.get<string>("GEMINI_API_KEY");
-    this.tutorAI = new EnglishSathiAI(geminiKey);
-    this.scenarioAI = new VoiceScenarioService(geminiKey);
+    const geminiModel = this.config.get<string>("GEMINI_MODEL", DEFAULT_GEMINI_MODEL);
+    this.tutorAI = new EnglishSathiAI(geminiKey, geminiModel);
+    this.scenarioAI = new VoiceScenarioService(geminiKey, geminiModel);
     this.providerName =
       geminiKey && geminiKey !== "your-gemini-api-key" && geminiKey.trim().length > 0
-        ? "gemini-2.5-flash"
+        ? geminiModel
         : "sathi-fallback";
   }
 
@@ -136,6 +138,10 @@ export class VoiceService {
         where: { id: sessionRecord.id },
         data: { status: "FAILED", endedAt: new Date(), durationSeconds: 0 },
       });
+      const conflictSessionId = await this.quotaService.getActiveOpenLockSessionId(userId);
+      if (conflictSessionId) {
+        this.quotaService.throwConcurrentConflict(conflictSessionId);
+      }
       throw new BadRequestException("Could not acquire active voice session lock. Please retry.");
     }
 
@@ -275,7 +281,9 @@ export class VoiceService {
       throw new VoiceQuotaExceededException(ended);
     }
 
-    await this.quotaService.refreshHeartbeat(userId, sessionId, quota.remainingSecondsToday);
+    await this.quotaService.refreshHeartbeat(userId, sessionId, quota.remainingSecondsToday, {
+      allowReacquire: true,
+    });
 
     const firstMsg = await this.prisma.message.findFirst({
       where: { sessionId, role: "ASSISTANT" },
@@ -413,17 +421,20 @@ export class VoiceService {
       );
 
       const level = (session.level ?? (profile.proficiencyLevel === "UNKNOWN" ? "A1" : profile.proficiencyLevel)) as ProficiencyLevel;
-      const aiResponse = await this.scenarioAI.processAudioTurn({
+      const topic = session.scenario ?? "English Conversation";
+      const nativeLanguage = this.resolveAiLanguage(
+        profile.explanationLanguage,
+        profile.nativeLanguage,
+      );
+
+      const audioResult = await this.scenarioAI.processAudioTurn({
         audioBase64: dto.audioBase64,
         mimeType: dto.mimeType,
-        scenario: session.scenario ?? "English Conversation",
+        scenario: topic,
         learner: {
           name: profile.displayName,
           level,
-          nativeLanguage: this.resolveAiLanguage(
-            profile.explanationLanguage,
-            profile.nativeLanguage,
-          ),
+          nativeLanguage,
         },
         messageHistory: history.map((m) => ({
           role: m.role === "USER" ? ("user" as const) : ("model" as const),
@@ -431,17 +442,62 @@ export class VoiceService {
         })),
       });
 
-      const transcript = aiResponse.transcript?.trim() || "[Voice audio response]";
+      let transcript = audioResult.audioClear === false ? undefined : audioResult.transcript?.trim();
+      let finalResponse: TutorTurnResponse = audioResult;
+      let audioClear: boolean = audioResult.audioClear !== false;
+
+      // Only consult browser live captions when Gemini itself could not run (fallback mode).
+      // Never override Gemini's own unclear-audio judgment with browser speech hints.
+      const hint = dto.transcriptHint?.trim();
+      if (audioResult.usedFallback && !transcript && hint) {
+        if (this.isFallbackCaptionClear(hint, dto.durationSeconds, dto.transcriptConfidence)) {
+          transcript = hint;
+          audioClear = true;
+          finalResponse = await this.tutorAI.generateTurnResponse({
+            userMessage: hint,
+            learnerLevel: level,
+            topic,
+            history: history.map((m): ConversationMessage => ({
+              id: m.id,
+              sender: m.role === "USER" ? "user" : "ai",
+              content: m.content,
+              timestamp: m.createdAt.toISOString(),
+            })),
+            nativeLanguage,
+            learnerName: profile.displayName,
+          });
+        } else {
+          audioClear = false;
+          transcript = undefined;
+          finalResponse = {
+            audioClear: false,
+            reply: `Your voice wasn't completely clear just now (I only caught "${hint}"). Please say your full sentence again clearly closer to the mic so I can understand you accurately.`,
+            feedback: [],
+            score: undefined,
+            encouragement: "Take your time — speaking clearly is what we're practicing!",
+            suggestedFollowUpQuestion: "Could you please repeat your full response cleanly?",
+          };
+        }
+      }
+
+      if (!audioClear || !transcript) {
+        audioClear = false;
+      }
+
+      const persistedUserContent = audioClear && transcript
+        ? transcript
+        : "[Unclear audio — asked to repeat]";
 
       const assistantSeq = await this.persistTurnMessages(
         session.id,
-        transcript,
+        persistedUserContent,
         {
           mimeType: dto.mimeType,
           audioDurationSeconds: dto.durationSeconds,
           hasAudio: true,
+          audioClear,
         },
-        aiResponse,
+        finalResponse,
       );
 
       const updatedQuota = await this.quotaService.getQuotaSummary(userId, session.startedAt);
@@ -453,12 +509,13 @@ export class VoiceService {
 
       return {
         sessionId: session.id,
-        ...(aiResponse.transcript ? { userTranscript: aiResponse.transcript } : {}),
-        reply: aiResponse.reply,
-        feedback: aiResponse.feedback as VoiceFeedbackItemDTO[],
-        ...(aiResponse.score !== undefined ? { score: aiResponse.score } : {}),
-        encouragement: aiResponse.encouragement,
-        followUpQuestion: aiResponse.suggestedFollowUpQuestion,
+        audioClear,
+        ...(audioClear && transcript ? { userTranscript: transcript } : {}),
+        reply: finalResponse.reply,
+        feedback: finalResponse.feedback as VoiceFeedbackItemDTO[],
+        ...(finalResponse.score !== undefined ? { score: finalResponse.score } : {}),
+        encouragement: finalResponse.encouragement,
+        followUpQuestion: finalResponse.suggestedFollowUpQuestion,
         messageSequence: assistantSeq,
         quota: updatedQuota,
       };
@@ -621,6 +678,16 @@ export class VoiceService {
     aiResponse: TutorTurnResponse,
   ): Promise<number> {
     return this.prisma.$transaction(async (tx) => {
+      const current = await tx.voiceSession.findUnique({
+        where: { id: sessionId },
+        select: { status: true },
+      });
+      if (!current || current.status === "COMPLETED" || current.status === "FAILED") {
+        throw new BadRequestException(
+          `Voice session has already ended (${current?.status ?? "NOT_FOUND"}).`,
+        );
+      }
+
       const last = await tx.message.findFirst({
         where: { sessionId },
         orderBy: { sequence: "desc" },
@@ -683,6 +750,24 @@ export class VoiceService {
     if (!allowed.includes(to)) {
       throw new BadRequestException(`Invalid voice session state transition: ${from} -> ${to}`);
     }
+  }
+
+  private isFallbackCaptionClear(
+    caption: string,
+    durationSeconds: number,
+    confidence?: number,
+  ): boolean {
+    if (confidence !== undefined && confidence > 0 && confidence < 0.6) {
+      return false;
+    }
+    const wordCount = caption.trim().split(/\s+/).filter(Boolean).length;
+    if (durationSeconds >= 5 && wordCount <= 2) {
+      return false;
+    }
+    if (durationSeconds >= 7 && wordCount / durationSeconds < 0.45) {
+      return false;
+    }
+    return wordCount >= 1;
   }
 
   private resolveAiLanguage(explanationLanguage: string, nativeLanguage: string): string {

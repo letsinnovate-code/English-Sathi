@@ -235,6 +235,8 @@ export interface SessionEvaluationDTO {
 export interface VoiceTurnResultDTO {
   /** Transcript of what the learner said (returned for audio turns when available). */
   userTranscript?: string;
+  /** False when the learner's speech was unclear/inaudible and Sathi asked them to repeat. */
+  audioClear?: boolean;
   /** The AI tutor's textual reply (also synthesised as speech by the client). */
   reply: string;
   /** Pedagogical feedback items for the user's utterance. */

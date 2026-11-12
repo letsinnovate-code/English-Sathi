@@ -37,12 +37,28 @@ import {
   speakTutorText,
   startLiveCaptions,
   type LiveCaptionsController,
+  type LiveCaptionsResult,
 } from "@/lib/voice-speech";
 import { AudioWaveform } from "@/components/voice/AudioWaveform";
 import { TranscriptPanel, type TranscriptEntry } from "@/components/voice/TranscriptPanel";
 
 type StudioMode = "setup" | "live" | "summary";
 type MicPermission = "prompt" | "granted" | "denied" | "unsupported";
+
+const MIC_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  channelCount: 1,
+};
+
+function createAudioRecorder(stream: MediaStream, mimeType: string): MediaRecorder {
+  try {
+    return new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 64000 });
+  } catch {
+    return new MediaRecorder(stream, { mimeType });
+  }
+}
 
 function formatClock(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
@@ -75,11 +91,15 @@ function PracticeStudioInner() {
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
   const [isSocketConnected, setIsSocketConnected] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [isThinking, setIsThinking] = useState(false);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [isInterrupted, setIsInterrupted] = useState(false);
+  const [autoSpeak, setAutoSpeak] = useState(true);
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
+  const [micDeviceLabel, setMicDeviceLabel] = useState("");
   const [liveCaption, setLiveCaption] = useState("");
+  const [captionWarning, setCaptionWarning] = useState("");
   const [textInput, setTextInput] = useState("");
   const [endedSummary, setEndedSummary] = useState<WsSessionEndedPayload | null>(null);
 
@@ -89,9 +109,13 @@ function PracticeStudioInner() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const captionsRef = useRef<LiveCaptionsController | null>(null);
+  const captionStopPromiseRef = useRef<Promise<LiveCaptionsResult> | null>(null);
+  const micPeakLevelRef = useRef<number>(0);
+  const activeSpeechFramesRef = useRef<number>(0);
   const chunksRef = useRef<Blob[]>([]);
   const recStartMsRef = useRef<number>(0);
   const liveCaptionRef = useRef<string>("");
+  const liveConfidenceRef = useRef<number | undefined>(undefined);
   const pendingUserEntryIdRef = useRef<string | null>(null);
   const autoSpeakRef = useRef<boolean>(true);
 
@@ -154,10 +178,32 @@ function PracticeStudioInner() {
     };
   }, [state.status, lessonParam]);
 
+  // ── Recording timer & cleanup ──
+  useEffect(() => {
+    if (!isRecording) {
+      setRecordingSeconds(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setRecordingSeconds((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isRecording]);
+
+  const handleAudioLevelSample = useCallback((peak: number) => {
+    if (peak > micPeakLevelRef.current) {
+      micPeakLevelRef.current = peak;
+    }
+    if (peak > 0.025) {
+      activeSpeechFramesRef.current += 1;
+    }
+  }, []);
+
   // ── Cleanup media, TTS & socket on unmount ──
   const stopMediaResources = useCallback(() => {
-    captionsRef.current?.stop();
+    void captionsRef.current?.stop();
     captionsRef.current = null;
+    captionStopPromiseRef.current = null;
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       try {
         mediaRecorderRef.current.stop();
@@ -219,12 +265,15 @@ function PracticeStudioInner() {
   // ── Microphone test helper ──
   async function handleEnableMicrophone() {
     setError("");
+    setCaptionWarning("");
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       setMicPermission("unsupported");
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
+      const label = stream.getAudioTracks()[0]?.label ?? "";
+      if (label) setMicDeviceLabel(label);
       stream.getTracks().forEach((t) => t.stop());
       setMicPermission("granted");
     } catch {
@@ -315,10 +364,17 @@ function PracticeStudioInner() {
           const pendingId = pendingUserEntryIdRef.current;
           pendingUserEntryIdRef.current = null;
 
-          const updated = pendingId && payload.userTranscript
-            ? prev.map((e) =>
-                e.id === pendingId ? { ...e, content: payload.userTranscript ?? e.content } : e,
-              )
+          const updated = pendingId
+            ? prev.map((e) => {
+                if (e.id !== pendingId) return e;
+                if (payload.audioClear === false) {
+                  return { ...e, content: "🎙️ Audio unclear — asked to repeat" };
+                }
+                if (payload.userTranscript) {
+                  return { ...e, content: payload.userTranscript };
+                }
+                return e;
+              })
             : prev;
 
           return [
@@ -481,9 +537,12 @@ function PracticeStudioInner() {
   async function handleStartRecording() {
     if (!sessionRef.current || !socketRef.current?.connected || isThinking) return;
     setError("");
+    setCaptionWarning("");
 
     if (isAiSpeaking) {
       handleInterrupt();
+      // Give Chromium TTS a brief beat to clear speaker output before opening the mic
+      await new Promise((r) => setTimeout(r, 150));
     }
 
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
@@ -493,15 +552,21 @@ function PracticeStudioInner() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
+      const label = stream.getAudioTracks()[0]?.label ?? "";
+      if (label) setMicDeviceLabel(label);
       setMicPermission("granted");
       mediaStreamRef.current = stream;
       setActiveStream(stream);
 
       const mimeType = pickSupportedAudioMime();
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = createAudioRecorder(stream, mimeType);
       chunksRef.current = [];
       liveCaptionRef.current = "";
+      liveConfidenceRef.current = undefined;
+      micPeakLevelRef.current = 0;
+      activeSpeechFramesRef.current = 0;
+      captionStopPromiseRef.current = null;
       setLiveCaption("");
       recStartMsRef.current = Date.now();
 
@@ -510,12 +575,25 @@ function PracticeStudioInner() {
       };
 
       recorder.onstop = async () => {
-        captionsRef.current?.stop();
+        const stopPromise =
+          captionStopPromiseRef.current ??
+          (captionsRef.current
+            ? captionsRef.current.stop()
+            : Promise.resolve({
+                transcript: liveCaptionRef.current,
+                confidence: liveConfidenceRef.current,
+              }));
         captionsRef.current = null;
+        captionStopPromiseRef.current = null;
+
         stream.getTracks().forEach((t) => t.stop());
         mediaStreamRef.current = null;
         setActiveStream(null);
         setIsRecording(false);
+
+        const flushed = await stopPromise;
+        const capturedText = (flushed.transcript || liveCaptionRef.current).trim();
+        const capturedConfidence = flushed.confidence ?? liveConfidenceRef.current;
 
         const activeSession = sessionRef.current;
         const socket = socketRef.current;
@@ -525,16 +603,32 @@ function PracticeStudioInner() {
           0.5,
           Number(((Date.now() - recStartMsRef.current) / 1000).toFixed(1)),
         );
-        const capturedText = liveCaptionRef.current.trim();
+        const peakLevel = micPeakLevelRef.current;
+        const speechFrames = activeSpeechFramesRef.current;
         const blob = new Blob(chunksRef.current, { type: mimeType });
         chunksRef.current = [];
 
-        if (blob.size < 200 && !capturedText) {
+        if (blob.size < 250 && !capturedText) {
           return;
         }
 
-        // In fallback mode, send browser transcript if captured so grammar checks analyze spoken words.
+        if (!capturedText && (peakLevel <= 0.002 || (durationSeconds >= 1.5 && speechFrames === 0))) {
+          setCaptionWarning(
+            "Your voice sounded silent or too faint — please speak clearly closer to your microphone and try again.",
+          );
+          setLiveCaption("");
+          return;
+        }
+
+        // In explicit fallback mode, route only clear speech-to-text transcripts through text evaluation.
         if (activeSession.provider === "sathi-fallback" && capturedText.length > 0) {
+          if (capturedConfidence !== undefined && capturedConfidence < 0.6) {
+            setCaptionWarning(
+              "Your speech wasn't clear enough to understand accurately — please speak again clearly closer to the mic.",
+            );
+            setLiveCaption("");
+            return;
+          }
           const entryId = `msg-user-${Date.now()}`;
           setEntries((prev) => [
             ...prev,
@@ -564,7 +658,10 @@ function PracticeStudioInner() {
             {
               id: entryId,
               role: "USER",
-              content: capturedText || "🎙️ Voice response sent…",
+              content:
+                activeSession.provider === "sathi-fallback" && capturedText
+                  ? capturedText
+                  : "🎙️ Listening & checking your speech…",
               createdAt: new Date().toISOString(),
             },
           ]);
@@ -574,6 +671,8 @@ function PracticeStudioInner() {
             audioBase64,
             mimeType,
             durationSeconds,
+            ...(capturedText ? { transcriptHint: capturedText } : {}),
+            ...(capturedConfidence !== undefined ? { transcriptConfidence: capturedConfidence } : {}),
           });
           setLiveCaption("");
         } catch {
@@ -588,9 +687,19 @@ function PracticeStudioInner() {
 
       if (isSpeechRecognitionSupported()) {
         captionsRef.current = startLiveCaptions({
-          onTranscriptUpdate: (text) => {
-            liveCaptionRef.current = text;
-            setLiveCaption(text);
+          onTranscriptUpdate: (res) => {
+            liveCaptionRef.current = res.transcript;
+            if (res.confidence !== undefined) {
+              liveConfidenceRef.current = res.confidence;
+            }
+            setLiveCaption(res.transcript);
+          },
+          onError: (code) => {
+            if (code === "network" && sessionRef.current?.provider === "sathi-fallback") {
+              setCaptionWarning("Browser live captions offline — recording raw mic audio.");
+            } else if (code === "not-allowed" || code === "service-not-allowed") {
+              setCaptionWarning("Speech recognition blocked by browser — recording raw mic audio.");
+            }
           },
         });
       }
@@ -601,6 +710,10 @@ function PracticeStudioInner() {
   }
 
   function handleStopRecording() {
+    if (captionsRef.current && !captionStopPromiseRef.current) {
+      captionStopPromiseRef.current = captionsRef.current.stop();
+      captionsRef.current = null;
+    }
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
@@ -712,6 +825,25 @@ function PracticeStudioInner() {
         </div>
 
         <div className="practice-topbar-right">
+          {mode === "live" && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ padding: "0.4rem 0.75rem", fontSize: "0.82rem" }}
+              onClick={() => {
+                const next = !autoSpeakRef.current;
+                autoSpeakRef.current = next;
+                setAutoSpeak(next);
+                if (!next) {
+                  cancelTutorSpeech();
+                  setIsAiSpeaking(false);
+                }
+              }}
+              title="Toggle automatic voice playback for Sathi's replies"
+            >
+              {autoSpeak ? "🔊 Voice On" : "🔇 Muted"}
+            </button>
+          )}
           {quota && (
             <span className="quota-pill" title="Remaining daily speaking quota">
               ⏱️ {formatClock(quota.remainingSecondsToday)} left today
@@ -847,11 +979,13 @@ function PracticeStudioInner() {
                   {micPermission === "granted" ? "✓ Microphone Ready" : "🎤 Enable Microphone"}
                 </button>
                 <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
-                  {micPermission === "denied"
-                    ? "Mic blocked — text fallback still works"
-                    : micPermission === "unsupported"
-                      ? "Audio recording unavailable — use text mode"
-                      : "Or practice silently using text input anytime"}
+                  {micPermission === "granted" && micDeviceLabel
+                    ? `Active mic: ${micDeviceLabel}`
+                    : micPermission === "denied"
+                      ? "Mic blocked — text fallback still works"
+                      : micPermission === "unsupported"
+                        ? "Audio recording unavailable — use text mode"
+                        : "Or practice silently using text input anytime"}
                 </span>
               </div>
 
@@ -888,11 +1022,27 @@ function PracticeStudioInner() {
                 stream={activeStream}
                 isRecording={isRecording}
                 isSpeaking={isAiSpeaking}
+                onLevelSample={handleAudioLevelSample}
               />
 
-              {liveCaption && (
-                <div className="alert alert-info" style={{ padding: "0.5rem 0.75rem" }}>
-                  <strong>Hearing:</strong> {liveCaption}
+              {isRecording && (
+                <div className="alert alert-info" style={{ padding: "0.55rem 0.75rem" }}>
+                  <strong>Listening ({formatClock(recordingSeconds)}):</strong>{" "}
+                  {session?.provider === "sathi-fallback"
+                    ? liveCaption || "Speak clearly in English — click Stop & Send Voice when done."
+                    : "Speak clearly in English — Sathi is listening closely. Click Stop & Send Voice when done."}
+                </div>
+              )}
+
+              {!isRecording && micDeviceLabel && (
+                <div style={{ fontSize: "0.78rem", color: "var(--text-muted)", textAlign: "center" }}>
+                  Mic: {micDeviceLabel}
+                </div>
+              )}
+
+              {captionWarning && (
+                <div className="alert alert-info" style={{ padding: "0.45rem 0.75rem", fontSize: "0.82rem" }}>
+                  {captionWarning}
                 </div>
               )}
 

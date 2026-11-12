@@ -141,6 +141,20 @@ describe("Voice Session Validation Schemas", () => {
     expect(result.success).toBe(false);
   });
 
+  it("accepts optional transcriptHint on VoiceTurnAudio", () => {
+    const withHint = VoiceTurnAudioSchema.safeParse({
+      sessionId: VALID_UUID,
+      audioBase64: "SGVsbG8=",
+      mimeType: "audio/webm",
+      durationSeconds: 3.4,
+      transcriptHint: "Hello, my name is Aarav.",
+    });
+    expect(withHint.success).toBe(true);
+    if (withHint.success) {
+      expect(withHint.data.transcriptHint).toBe("Hello, my name is Aarav.");
+    }
+  });
+
   it("rejects VoiceTurnAudio with zero or negative duration", () => {
     const zeroDuration = VoiceTurnAudioSchema.safeParse({
       sessionId: VALID_UUID,

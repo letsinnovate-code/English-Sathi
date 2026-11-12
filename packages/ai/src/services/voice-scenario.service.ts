@@ -1,10 +1,18 @@
-import { GoogleGenAI } from "@google/genai";
+import type { GoogleGenAI } from "@google/genai";
 import type { ProficiencyLevel } from "@english-sathi/shared-types";
 import {
+    parseRawJsonObject,
     TutorTurnResponseSchema,
     type TutorTurnResponse,
 } from "../schemas/tutor-response.schema";
 import { buildTutorSystemPrompt } from "../prompts/tutor.prompt";
+import {
+    buildNormalizedTextContents,
+    createGeminiClient,
+    DEFAULT_GEMINI_MODEL,
+    generateWithModelFallback,
+    resolveModelChain,
+} from "../utils/gemini-runner";
 
 /**
  * Lesson content shape from seed / DB (typed for AI use).
@@ -38,23 +46,29 @@ export interface AudioTurnParams {
     messageHistory?: Array<{ role: "user" | "model"; content: string }>;
 }
 
+const UNCLEAR_TRANSCRIPT_PATTERN =
+    /^(\[?\s*(silence|silent|inaudible|unclear|unintelligible|noise|background noise|no speech|nothing heard|static|music|none|empty)\s*\]?|\.{2,}|-+)$/i;
+
+export interface AudioTurnResult extends TutorTurnResponse {
+    transcript?: string;
+    usedFallback?: boolean;
+}
+
 /**
  * Voice Scenario Service — session-level AI helpers.
  *
  * Responsibilities:
  * 1. Generate a lesson-aware opening greeting (Sathi as the scenario participant).
- * 2. Process native audio turns via Gemini multimodal (falls back to transcription-less heuristic).
+ * 2. Process native audio turns via Gemini multimodal with strict clarity checks
+ *    (asks learner to repeat cleanly instead of guessing unclear/inaudible audio).
  */
 export class VoiceScenarioService {
     private ai: GoogleGenAI | null = null;
-    private modelName: string;
+    private modelChain: string[];
 
-    constructor(apiKey?: string, modelName = "gemini-2.5-flash") {
-        this.modelName = modelName;
-        const key = apiKey || process.env.GEMINI_API_KEY;
-        if (key && key !== "your-gemini-api-key" && key.trim().length > 0) {
-            this.ai = new GoogleGenAI({ apiKey: key });
-        }
+    constructor(apiKey?: string, modelName = DEFAULT_GEMINI_MODEL) {
+        this.modelChain = resolveModelChain(modelName);
+        this.ai = createGeminiClient(apiKey);
     }
 
     // ─── Opening Greeting ────────────────────────────────────────────────────
@@ -99,18 +113,13 @@ export class VoiceScenarioService {
                 .filter(Boolean)
                 .join("\n");
 
-            const response = await this.ai.models.generateContent({
-                model: this.modelName,
+            const { text: rawText } = await generateWithModelFallback(this.ai, this.modelChain, {
                 contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-                config: {
-                    systemInstruction,
-                    responseMimeType: "application/json",
-                    temperature: 0.5,
-                },
+                systemInstruction,
+                temperature: 0.4,
             });
 
-            const rawText = response.text || "{}";
-            const parsed = JSON.parse(rawText);
+            const parsed = parseRawJsonObject(rawText);
             const validated = TutorTurnResponseSchema.safeParse(parsed);
             if (validated.success) {
                 return validated.data;
@@ -129,18 +138,18 @@ export class VoiceScenarioService {
     /**
      * Processes a base64-encoded audio turn through Gemini multimodal.
      *
-     * When GEMINI_API_KEY is set Gemini performs built-in transcription +
-     * pedagogical evaluation in one round-trip (no separate STT step needed
-     * for MVP). Falls back to a text-mode heuristic response when no key is
-     * configured or the API call fails.
+     * Tuned for high-accuracy Indian English listening and strict anti-guessing:
+     * if audio is muffled, quiet, cut off, or noisy, Gemini returns `audioClear: false`
+     * and asks the learner to repeat instead of fabricating words or advancing the topic.
      */
-    async processAudioTurn(params: AudioTurnParams): Promise<TutorTurnResponse & { transcript?: string }> {
+    async processAudioTurn(params: AudioTurnParams): Promise<AudioTurnResult> {
         const { audioBase64, mimeType, learner, scenario, messageHistory = [] } = params;
 
         if (!this.ai) {
             return {
-                ...this.buildFallbackAudioResponse(scenario),
+                ...this.buildUnclearAudioResponse(scenario, messageHistory),
                 transcript: undefined,
+                usedFallback: true,
             };
         }
 
@@ -153,12 +162,39 @@ export class VoiceScenarioService {
                 recurringMistakes: learner.recurringMistakes,
             });
 
-            const historyContents = messageHistory.map((m) => ({
-                role: m.role,
-                parts: [{ text: m.content }],
-            }));
+            const historyContents = buildNormalizedTextContents(
+                messageHistory.map((m) => ({
+                    role: m.role,
+                    text: m.content,
+                })),
+                scenario,
+            );
+            // If history ended on a "user" message before our new audio user turn,
+            // append a neutral separator so roles still alternate cleanly.
+            if (historyContents.length > 0 && historyContents[historyContents.length - 1].role === "user") {
+                historyContents.push({
+                    role: "model",
+                    parts: [{ text: "Please continue." }],
+                });
+            }
 
-            // The final user turn includes the audio blob
+            const audioPrompt = [
+                `AUDIO LISTENING & TRANSCRIPTION RULES (STRICT):`,
+                `1. Listen VERY CAREFULLY word-for-word to the learner's speech. The learner speaks Indian English (native language: ${learner.nativeLanguage || "hindi"}) at CEFR ${learner.level}.`,
+                `2. Pay close attention to Indian names, cities/states (e.g., Jabalpur, Madhya Pradesh, Ahmedabad, Jaipur), everyday vocabulary, and natural pauses — NEVER replace uncertain words with random unrelated words.`,
+                `3. DO NOT GUESS OR INVENT WHAT WAS SAID. Only transcribe words you genuinely hear clearly in the audio.`,
+                `4. CLARITY GATE: If the audio is silent, mostly background noise, too faint, muffled, cut off, or too unclear to understand confidently:`,
+                `   - Set "audioClear": false`,
+                `   - Set "transcript": ""`,
+                `   - Set "feedback": [] and "score": null`,
+                `   - In "reply", honestly tell the student their voice was not clear enough (say whether it sounded too quiet, noisy, or cut off) and politely ask them to repeat that response clearly — do NOT praise what wasn't heard and do NOT move on to a new question/topic.`,
+                `   - In "suggestedFollowUpQuestion", gently ask them to try saying it again clearly.`,
+                `5. If the audio IS clearly audible:`,
+                `   - Set "audioClear": true`,
+                `   - Set "transcript" to the exact verbatim words the learner spoke (preserve grammatical slips accurately so you can correct them).`,
+                `   - Provide your concise reply, accurate feedback on what they actually said, score, encouragement, and ONE relevant suggestedFollowUpQuestion.`,
+            ].join("\n");
+
             const userTurnParts = [
                 {
                     inlineData: {
@@ -167,34 +203,44 @@ export class VoiceScenarioService {
                     },
                 },
                 {
-                    text: "Please transcribe what the learner said and then produce your pedagogical evaluation and reply as specified JSON.",
+                    text: audioPrompt,
                 },
             ];
 
-            const response = await this.ai.models.generateContent({
-                model: this.modelName,
+            const { text: rawText } = await generateWithModelFallback(this.ai, this.modelChain, {
                 contents: [
                     ...historyContents,
                     { role: "user", parts: userTurnParts },
                 ],
-                config: {
-                    systemInstruction,
-                    responseMimeType: "application/json",
-                    temperature: 0.6,
-                },
+                systemInstruction,
+                temperature: 0.2,
             });
 
-            const rawText = response.text || "{}";
-            const parsed = JSON.parse(rawText);
-
-            // The model may include a 'transcript' field even though our schema
-            // doesn't require it — extract it before schema validation.
-            const transcript: string | undefined =
-                typeof parsed?.transcript === "string" ? parsed.transcript : undefined;
+            const parsed = parseRawJsonObject(rawText);
 
             const validated = TutorTurnResponseSchema.safeParse(parsed);
             if (validated.success) {
-                return { ...validated.data, transcript };
+                const rawTranscript =
+                    typeof parsed?.["transcript"] === "string" ? parsed["transcript"].trim() : "";
+
+                if (
+                    validated.data.audioClear === false ||
+                    rawTranscript.length === 0 ||
+                    UNCLEAR_TRANSCRIPT_PATTERN.test(rawTranscript)
+                ) {
+                    return {
+                        ...this.buildUnclearAudioResponse(scenario, messageHistory),
+                        transcript: undefined,
+                        usedFallback: false,
+                    };
+                }
+
+                return {
+                    ...validated.data,
+                    audioClear: true,
+                    transcript: rawTranscript,
+                    usedFallback: false,
+                };
             }
 
             console.warn("[VoiceScenarioService] Audio turn schema validation failed:", validated.error);
@@ -202,7 +248,11 @@ export class VoiceScenarioService {
             console.warn("[VoiceScenarioService] Gemini audio API error:", error);
         }
 
-        return { ...this.buildFallbackAudioResponse(scenario), transcript: undefined };
+        return {
+            ...this.buildUnclearAudioResponse(scenario, messageHistory),
+            transcript: undefined,
+            usedFallback: true,
+        };
     }
 
     // ─── Private fallbacks ───────────────────────────────────────────────────
@@ -218,13 +268,29 @@ export class VoiceScenarioService {
         };
     }
 
-    private buildFallbackAudioResponse(scenario: string): TutorTurnResponse {
+    private buildUnclearAudioResponse(
+        scenario: string,
+        messageHistory: Array<{ role: "user" | "model"; content: string }>,
+    ): TutorTurnResponse {
+        const turnCount = messageHistory.filter((m) => m.role === "user").length;
+        const replies = [
+            `Sorry, I couldn't hear what you said clearly in "${scenario}". Please speak a little louder and closer to your microphone so I don't misunderstand you.`,
+            `Your voice wasn't clear enough for me to catch your words accurately just now. Please say that sentence again clearly without rushing.`,
+            `I couldn't clearly make out your response — there may have been low volume or background noise. Please repeat it one more time cleanly.`,
+        ];
+        const followUps = [
+            "Could you please repeat your response clearly in English?",
+            "Whenever you're ready, try saying that sentence again closer to the mic.",
+            "Please speak again clearly (or type below if your mic is having trouble).",
+        ];
+
         return {
-            reply: `I heard your response about ${scenario}. That was a great attempt! Let's keep practising together.`,
+            audioClear: false,
+            reply: replies[turnCount % replies.length],
             feedback: [],
-            score: 80,
-            encouragement: "Every spoken word is a step forward — keep it up!",
-            suggestedFollowUpQuestion: "Can you try saying that again, but a bit more slowly and clearly?",
+            score: undefined,
+            encouragement: "No worries — clear speech matters more than speed. Take a moment and try again!",
+            suggestedFollowUpQuestion: followUps[turnCount % followUps.length],
         };
     }
 }

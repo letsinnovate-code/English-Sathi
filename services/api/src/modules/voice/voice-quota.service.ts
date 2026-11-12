@@ -17,6 +17,24 @@ const DEFAULT_FREE_LIMIT_SECONDS = 600; // 10 min/day fallback
 const STALE_SESSION_MS = 5 * 60 * 1000; // 5 min without heartbeat -> auto-fail unstarted/orphaned session
 const HEARTBEAT_TTL_SECONDS = 120;
 const TURN_LOCK_TTL_SECONDS = 30;
+const OPEN_SESSION_STATUSES = ["CREATED", "CONNECTING", "ACTIVE", "INTERRUPTED"] as const;
+
+const DELETE_IF_MATCH_LUA = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+end
+return 0
+`;
+
+const REFRESH_HEARTBEAT_LUA = `
+local cur = redis.call("get", KEYS[1])
+if cur == ARGV[1] or (not cur and ARGV[4] == "1") then
+  redis.call("set", KEYS[1], ARGV[1], "EX", tonumber(ARGV[2]))
+  redis.call("set", KEYS[2], "1", "EX", tonumber(ARGV[3]))
+  return 1
+end
+return 0
+`;
 
 @Injectable()
 export class VoiceQuotaService {
@@ -121,23 +139,37 @@ export class VoiceQuotaService {
     const existingOpen = await this.prisma.voiceSession.findFirst({
       where: {
         userId,
-        status: { in: ["CREATED", "CONNECTING", "ACTIVE", "INTERRUPTED"] },
+        status: { in: [...OPEN_SESSION_STATUSES] },
       },
       orderBy: { createdAt: "desc" },
       select: { id: true },
     });
 
     if (existingOpen) {
-      throw new ConflictException({
-        message: "You already have an active voice session in progress.",
-        details: {
-          code: "CONCURRENT_SESSION",
-          activeSessionId: existingOpen.id,
-        },
-      });
+      this.throwConcurrentConflict(existingOpen.id);
+    }
+
+    // Reconcile Redis against DB so an orphaned/resurrected lock never blocks new sessions
+    const conflictingLockSessionId = await this.reconcileSessionLock(userId);
+    if (conflictingLockSessionId) {
+      this.throwConcurrentConflict(conflictingLockSessionId);
     }
 
     return quota;
+  }
+
+  throwConcurrentConflict(activeSessionId: string): never {
+    throw new ConflictException({
+      message: "You already have an active voice session in progress.",
+      details: {
+        code: "CONCURRENT_SESSION",
+        activeSessionId,
+      },
+    });
+  }
+
+  async getActiveOpenLockSessionId(userId: string): Promise<string | null> {
+    return this.reconcileSessionLock(userId);
   }
 
   async acquireSessionLock(
@@ -147,10 +179,20 @@ export class VoiceQuotaService {
   ): Promise<boolean> {
     const ttl = Math.max(120, Math.min(7200, remainingSeconds + 60));
     const lockKey = `${ACTIVE_SESSION_PREFIX}${userId}`;
-    const result = await this.redis.set(lockKey, sessionId, "EX", ttl, "NX");
+    let result = await this.redis.set(lockKey, sessionId, "EX", ttl, "NX");
+
+    if (result !== "OK") {
+      // If the existing Redis lock points to a COMPLETED/FAILED/missing session, clear it and retry once
+      const conflictingSessionId = await this.reconcileSessionLock(userId, sessionId);
+      if (!conflictingSessionId) {
+        result = await this.redis.set(lockKey, sessionId, "EX", ttl, "NX");
+      }
+    }
+
     if (result !== "OK") {
       return false;
     }
+
     await this.redis.set(`${HEARTBEAT_PREFIX}${sessionId}`, "1", "EX", HEARTBEAT_TTL_SECONDS);
     return true;
   }
@@ -159,21 +201,50 @@ export class VoiceQuotaService {
     userId: string,
     sessionId: string,
     remainingSeconds: number,
-  ): Promise<void> {
+    options?: { allowReacquire?: boolean },
+  ): Promise<boolean> {
+    if (!(await this.isSessionOpenInDb(sessionId))) {
+      await this.releaseSessionLock(userId, sessionId);
+      return false;
+    }
+
     const lockTtl = Math.max(120, Math.min(7200, remainingSeconds + 60));
-    await Promise.all([
-      this.redis.set(`${HEARTBEAT_PREFIX}${sessionId}`, "1", "EX", HEARTBEAT_TTL_SECONDS),
-      this.redis.set(`${ACTIVE_SESSION_PREFIX}${userId}`, sessionId, "EX", lockTtl),
-    ]);
+    const lockKey = `${ACTIVE_SESSION_PREFIX}${userId}`;
+    const heartbeatKey = `${HEARTBEAT_PREFIX}${sessionId}`;
+    const allowReacquireFlag = options?.allowReacquire ? "1" : "0";
+
+    const refreshed = Number(
+      await this.redis.eval(
+        REFRESH_HEARTBEAT_LUA,
+        2,
+        lockKey,
+        heartbeatKey,
+        sessionId,
+        String(lockTtl),
+        String(HEARTBEAT_TTL_SECONDS),
+        allowReacquireFlag,
+      ),
+    );
+
+    if (refreshed !== 1) {
+      return false;
+    }
+
+    // Double-check DB after writing so an endSession commit interleaved before Lua never leaves a resurrected lock
+    if (!(await this.isSessionOpenInDb(sessionId))) {
+      await this.releaseSessionLock(userId, sessionId);
+      return false;
+    }
+
+    return true;
   }
 
   async releaseSessionLock(userId: string, sessionId: string): Promise<void> {
     const lockKey = `${ACTIVE_SESSION_PREFIX}${userId}`;
-    const current = await this.redis.get(lockKey);
-    if (current === sessionId) {
-      await this.redis.del(lockKey);
-    }
-    await this.redis.del(`${HEARTBEAT_PREFIX}${sessionId}`);
+    await Promise.all([
+      this.deleteLockIfMatch(lockKey, sessionId),
+      this.redis.del(`${HEARTBEAT_PREFIX}${sessionId}`),
+    ]);
   }
 
   /**
@@ -191,11 +262,56 @@ export class VoiceQuotaService {
     try {
       return await fn();
     } finally {
-      const current = await this.redis.get(key);
-      if (current === token) {
-        await this.redis.del(key);
-      }
+      await this.deleteLockIfMatch(key, token);
     }
+  }
+
+  private async isSessionOpenInDb(sessionId: string): Promise<boolean> {
+    const row = await this.prisma.voiceSession.findUnique({
+      where: { id: sessionId },
+      select: { status: true },
+    });
+    return Boolean(
+      row && OPEN_SESSION_STATUSES.includes(row.status as (typeof OPEN_SESSION_STATUSES)[number]),
+    );
+  }
+
+  private async reconcileSessionLock(
+    userId: string,
+    ignoreSessionId?: string,
+  ): Promise<string | null> {
+    const lockKey = `${ACTIVE_SESSION_PREFIX}${userId}`;
+    const lockedSessionId = await this.redis.get(lockKey);
+    if (!lockedSessionId || lockedSessionId === ignoreSessionId) {
+      return null;
+    }
+
+    const lockedSession = await this.prisma.voiceSession.findUnique({
+      where: { id: lockedSessionId },
+      select: { id: true, status: true },
+    });
+
+    const isOpen = Boolean(
+      lockedSession &&
+        OPEN_SESSION_STATUSES.includes(
+          lockedSession.status as (typeof OPEN_SESSION_STATUSES)[number],
+        ),
+    );
+
+    if (isOpen && lockedSession) {
+      return lockedSession.id;
+    }
+
+    await this.deleteLockIfMatch(lockKey, lockedSessionId);
+    await this.redis.del(`${HEARTBEAT_PREFIX}${lockedSessionId}`);
+    this.logger.warn(
+      `Cleared orphaned Redis voice lock for user ${userId} (ended/missing session ${lockedSessionId})`,
+    );
+    return null;
+  }
+
+  private async deleteLockIfMatch(key: string, expectedValue: string): Promise<void> {
+    await this.redis.eval(DELETE_IF_MATCH_LUA, 1, key, expectedValue);
   }
 
   private async reapStaleSessions(userId: string): Promise<void> {

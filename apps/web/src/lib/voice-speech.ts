@@ -21,9 +21,17 @@ export function mapSpeakingSpeedToRate(speed?: SpeakingSpeed): number {
 }
 
 export function cancelTutorSpeech(): void {
+  speechGeneration += 1;
+  if (speechWatchdog !== null) {
+    clearTimeout(speechWatchdog);
+    speechWatchdog = null;
+  }
   if (!isSpeechSynthesisSupported()) return;
   window.speechSynthesis.cancel();
 }
+
+let speechGeneration = 0;
+let speechWatchdog: ReturnType<typeof setTimeout> | null = null;
 
 export function speakTutorText(
   text: string,
@@ -35,35 +43,74 @@ export function speakTutorText(
     return false;
   }
 
-  window.speechSynthesis.cancel();
-
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = "en-IN";
-  utterance.rate = mapSpeakingSpeedToRate(speed);
-
-  const voices = window.speechSynthesis.getVoices();
-  const preferredVoice =
-    voices.find((v) => v.lang.toLowerCase() === "en-in") ??
-    voices.find((v) => v.lang.toLowerCase().startsWith("en-")) ??
-    null;
-
-  if (preferredVoice) {
-    utterance.voice = preferredVoice;
-    utterance.lang = preferredVoice.lang;
+  const gen = ++speechGeneration;
+  if (speechWatchdog !== null) {
+    clearTimeout(speechWatchdog);
+    speechWatchdog = null;
   }
 
-  let finished = false;
-  const done = () => {
-    if (finished) return;
-    finished = true;
-    callbacks?.onEnd?.();
+  const wasBusy = window.speechSynthesis.speaking || window.speechSynthesis.pending;
+  if (wasBusy) {
+    window.speechSynthesis.cancel();
+  }
+
+  const startUtterance = () => {
+    if (gen !== speechGeneration) return;
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-IN";
+    utterance.rate = mapSpeakingSpeedToRate(speed);
+
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice =
+      voices.find((v) => v.lang.toLowerCase() === "en-in") ??
+      voices.find((v) => v.lang.toLowerCase().startsWith("en-")) ??
+      null;
+
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+      utterance.lang = preferredVoice.lang;
+    }
+
+    let finished = false;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      if (speechWatchdog !== null) {
+        clearTimeout(speechWatchdog);
+        speechWatchdog = null;
+      }
+      if (gen === speechGeneration) {
+        callbacks?.onEnd?.();
+      }
+    };
+
+    utterance.onstart = () => {
+      if (gen === speechGeneration) {
+        callbacks?.onStart?.();
+      }
+    };
+    utterance.onend = done;
+    utterance.onerror = done;
+
+    // Failsafe watchdog in case Chromium stalls SpeechSynthesis onend
+    const wordCount = text.trim().split(/\s+/).length;
+    const estimatedMs = Math.min(45000, Math.max(6000, wordCount * 450 + 3500));
+    speechWatchdog = setTimeout(done, estimatedMs);
+
+    try {
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      done();
+    }
   };
 
-  utterance.onstart = () => callbacks?.onStart?.();
-  utterance.onend = done;
-  utterance.onerror = done;
-
-  window.speechSynthesis.speak(utterance);
+  // Delay slightly after cancel() to avoid Chromium dropping the new utterance synchronously
+  if (wasBusy) {
+    setTimeout(startUtterance, 50);
+  } else {
+    startUtterance();
+  }
   return true;
 }
 
@@ -71,6 +118,7 @@ export function speakTutorText(
 
 interface BrowserSpeechRecognitionAlternative {
   transcript: string;
+  confidence?: number;
 }
 
 interface BrowserSpeechRecognitionResult {
@@ -83,12 +131,16 @@ interface BrowserSpeechRecognitionEvent {
   results: ArrayLike<BrowserSpeechRecognitionResult>;
 }
 
+interface BrowserSpeechRecognitionErrorEvent {
+  error?: string;
+}
+
 interface BrowserSpeechRecognition {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
   onresult: ((ev: BrowserSpeechRecognitionEvent) => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((ev: BrowserSpeechRecognitionErrorEvent) => void) | null;
   onend: (() => void) | null;
   start: () => void;
   stop: () => void;
@@ -107,55 +159,152 @@ export function isSpeechRecognitionSupported(): boolean {
   return getSpeechRecognitionCtor() !== null;
 }
 
+export interface LiveCaptionsResult {
+  transcript: string;
+  confidence?: number;
+}
+
 export interface LiveCaptionsController {
-  stop: () => void;
+  stop: () => Promise<LiveCaptionsResult>;
 }
 
 export function startLiveCaptions(callbacks: {
-  onTranscriptUpdate: (fullTranscript: string) => void;
+  onTranscriptUpdate: (result: LiveCaptionsResult) => void;
+  onError?: (errorCode: string) => void;
 }): LiveCaptionsController | null {
   const Ctor = getSpeechRecognitionCtor();
   if (!Ctor) return null;
 
-  const recognition = new Ctor();
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.lang = "en-IN";
+  let active = true;
+  let committed = "";
+  let segmentFinal = "";
+  let segmentInterim = "";
+  let confidenceSum = 0;
+  let confidenceCount = 0;
+  let fatalError = false;
+  let currentRec: BrowserSpeechRecognition | null = null;
+  let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  let stopResolvers: Array<(result: LiveCaptionsResult) => void> = [];
 
-  let finalized = "";
+  const getCombinedResult = (): LiveCaptionsResult => ({
+    transcript: [committed, segmentFinal, segmentInterim]
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(" ")
+      .trim(),
+    confidence:
+      confidenceCount > 0 ? Number((confidenceSum / confidenceCount).toFixed(2)) : undefined,
+  });
 
-  recognition.onresult = (event) => {
-    let interim = "";
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const result = event.results[i];
-      const text = result?.[0]?.transcript ?? "";
-      if (result?.isFinal) {
-        finalized = `${finalized} ${text}`.trim();
-      } else {
-        interim = `${interim} ${text}`.trim();
-      }
+  const resolveWaiters = () => {
+    const finalResult = getCombinedResult();
+    const pending = stopResolvers;
+    stopResolvers = [];
+    for (const resolve of pending) {
+      resolve(finalResult);
     }
-    callbacks.onTranscriptUpdate(`${finalized} ${interim}`.trim());
   };
 
-  recognition.onerror = () => {
-    // Graceful no-op; MediaRecorder still captures raw audio
+  const launchInstance = () => {
+    if (!active || fatalError) {
+      resolveWaiters();
+      return;
+    }
+
+    const recognition = new Ctor();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-IN";
+    currentRec = recognition;
+
+    recognition.onresult = (event) => {
+      let latestInterim = "";
+      let rebuiltFinal = "";
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i];
+        const alt = result?.[0];
+        const text = alt?.transcript ?? "";
+        if (result?.isFinal) {
+          rebuiltFinal = `${rebuiltFinal} ${text}`.trim();
+          if (i >= event.resultIndex && typeof alt?.confidence === "number" && alt.confidence > 0) {
+            confidenceSum += alt.confidence;
+            confidenceCount += 1;
+          }
+        } else {
+          latestInterim = `${latestInterim} ${text}`.trim();
+        }
+      }
+      segmentFinal = rebuiltFinal;
+      segmentInterim = latestInterim;
+      callbacks.onTranscriptUpdate(getCombinedResult());
+    };
+
+    recognition.onerror = (ev) => {
+      const code = ev?.error ?? "unknown";
+      if (code === "not-allowed" || code === "service-not-allowed" || code === "audio-capture" || code === "network") {
+        fatalError = true;
+        callbacks.onError?.(code);
+      }
+    };
+
+    recognition.onend = () => {
+      // Preserve everything captured in this segment before clearing segment buffers
+      const segmentText = [segmentFinal, segmentInterim].filter(Boolean).join(" ").trim();
+      if (segmentText) {
+        committed = [committed, segmentText].filter(Boolean).join(" ").trim();
+        callbacks.onTranscriptUpdate(getCombinedResult());
+      }
+      segmentFinal = "";
+      segmentInterim = "";
+      currentRec = null;
+
+      if (active && !fatalError) {
+        restartTimer = setTimeout(launchInstance, 120);
+      } else {
+        resolveWaiters();
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      fatalError = true;
+      currentRec = null;
+      resolveWaiters();
+    }
   };
 
-  try {
-    recognition.start();
-  } catch {
-    return null;
-  }
+  launchInstance();
 
   return {
-    stop: () => {
-      try {
-        recognition.stop();
-      } catch {
-        // Ignore stop after already stopped
-      }
-    },
+    stop: () =>
+      new Promise<LiveCaptionsResult>((resolve) => {
+        active = false;
+        if (restartTimer !== null) {
+          clearTimeout(restartTimer);
+          restartTimer = null;
+        }
+        if (!currentRec) {
+          resolve(getCombinedResult());
+          return;
+        }
+
+        const timeout = setTimeout(() => {
+          resolve(getCombinedResult());
+        }, 450);
+
+        stopResolvers.push((res) => {
+          clearTimeout(timeout);
+          resolve(res);
+        });
+
+        try {
+          currentRec.stop();
+        } catch {
+          clearTimeout(timeout);
+          resolve(getCombinedResult());
+        }
+      }),
   };
 }
 

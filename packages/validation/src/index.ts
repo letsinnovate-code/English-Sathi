@@ -150,6 +150,8 @@ export const VoiceTurnAudioSchema = z.object({
   audioBase64: z.string().min(1, "Audio data cannot be empty"),
   mimeType: z.enum(["audio/webm", "audio/ogg", "audio/wav"]),
   durationSeconds: z.number().positive("Audio duration must be positive").max(300),
+  transcriptHint: z.string().trim().max(2000).optional(),
+  transcriptConfidence: z.number().min(0).max(1).optional(),
 });
 
 /**

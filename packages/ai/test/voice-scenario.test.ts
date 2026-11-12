@@ -48,18 +48,19 @@ describe("VoiceScenarioService (offline / fallback mode)", () => {
         expect(response.feedback).toHaveLength(0);
     });
 
-    it("fallback audio turn returns valid schema response", async () => {
+    it("fallback audio turn returns valid schema response asking learner to repeat when unclear", async () => {
         const response = await service.processAudioTurn({
             audioBase64: "SGVsbG8=",
             mimeType: "audio/webm",
-            durationSeconds: 3.2,
             learner: LEARNER_A2,
             scenario: "Ordering at a Café",
         });
 
         const validation = TutorTurnResponseSchema.safeParse(response);
         expect(validation.success).toBe(true);
-        expect(response.score).toBeGreaterThan(0);
+        expect(response.audioClear).toBe(false);
+        expect(response.score).toBeUndefined();
+        expect(response.feedback).toHaveLength(0);
     });
 
     it("fallback audio turn has undefined transcript (no STT without API key)", async () => {
@@ -84,6 +85,31 @@ describe("VoiceScenarioService (offline / fallback mode)", () => {
         expect(response.encouragement).not.toContain(", !");
         const validation = TutorTurnResponseSchema.safeParse(response);
         expect(validation.success).toBe(true);
+    });
+
+    it("rotates fallback audio responses across turns without repeating identically", async () => {
+        const turn1 = await service.processAudioTurn({
+            audioBase64: "SGVsbG8=",
+            mimeType: "audio/webm",
+            learner: LEARNER_A2,
+            scenario: "Ordering at a Café",
+            messageHistory: [{ role: "model", content: "Welcome!" }],
+        });
+
+        const turn2 = await service.processAudioTurn({
+            audioBase64: "SGVsbG8=",
+            mimeType: "audio/webm",
+            learner: LEARNER_A2,
+            scenario: "Ordering at a Café",
+            messageHistory: [
+                { role: "model", content: "Welcome!" },
+                { role: "user", content: "[Voice audio response]" },
+                { role: "model", content: turn1.reply },
+            ],
+        });
+
+        expect(turn2.reply).not.toBe(turn1.reply);
+        expect(turn2.suggestedFollowUpQuestion).not.toBe(turn1.suggestedFollowUpQuestion);
     });
 });
 

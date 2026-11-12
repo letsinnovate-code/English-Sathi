@@ -69,4 +69,48 @@ describe("EnglishSathiAI Service", () => {
         expect(grammarFeedback).toBeDefined();
         expect(grammarFeedback?.suggestion).toBe("he goes");
     });
+
+    it("should vary replies and follow-up questions across multi-turn fallback history", async () => {
+        const engine = new EnglishSathiAI();
+
+        const turn1 = await engine.generateTurnResponse({
+            userMessage: "Hi, my name is Aarav and I am from Jaipur.",
+            learnerLevel: "A2",
+            topic: "Introducing Yourself Confidently",
+            history: [
+                { id: "m1", sender: "ai", content: "Hello! Tell me your name.", timestamp: new Date().toISOString() },
+            ],
+        });
+
+        const turn2 = await engine.generateTurnResponse({
+            userMessage: "I work as a software developer in a tech company.",
+            learnerLevel: "A2",
+            topic: "Introducing Yourself Confidently",
+            history: [
+                { id: "m1", sender: "ai", content: "Hello! Tell me your name.", timestamp: new Date().toISOString() },
+                { id: "m2", sender: "user", content: "Hi, my name is Aarav and I am from Jaipur.", timestamp: new Date().toISOString() },
+                { id: "m3", sender: "ai", content: `${turn1.reply} ${turn1.suggestedFollowUpQuestion}`, timestamp: new Date().toISOString() },
+            ],
+        });
+
+        expect(turn1.reply).toContain("Aarav");
+        expect(turn2.reply).not.toBe(turn1.reply);
+        expect(turn2.suggestedFollowUpQuestion).not.toBe(turn1.suggestedFollowUpQuestion);
+    });
+
+    it("should catch double-past 'didn't ate' and provide English/Hindi fix", async () => {
+        const engine = new EnglishSathiAI();
+
+        const response = await engine.generateTurnResponse({
+            userMessage: "Yesterday I go to cafe and I didn't ate lunch.",
+            learnerLevel: "A2",
+            topic: "Daily Life",
+            nativeLanguage: "hindi",
+        });
+
+        const didFix = response.feedback.find((f) => f.original.toLowerCase().includes("didn't ate"));
+        const pastGoFix = response.feedback.find((f) => f.original.toLowerCase() === "i go");
+        expect(didFix?.suggestion).toBe("didn't eat");
+        expect(pastGoFix?.suggestion).toBe("I went");
+    });
 });
