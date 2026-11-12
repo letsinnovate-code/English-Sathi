@@ -473,6 +473,7 @@ export class VoiceService {
             audioClear: false,
             reply: `Your voice wasn't completely clear just now (I only caught "${hint}"). Please say your full sentence again clearly closer to the mic so I can understand you accurately.`,
             feedback: [],
+            contextualVocabulary: [],
             score: undefined,
             encouragement: "Take your time — speaking clearly is what we're practicing!",
             suggestedFollowUpQuestion: "Could you please repeat your full response cleanly?",

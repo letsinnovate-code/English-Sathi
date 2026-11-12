@@ -117,6 +117,13 @@ export type SendMessageInput = z.infer<typeof SendMessageSchema>;
 
 // ─── Milestone 3: Voice Session schemas ──────────────────────────────────────
 
+export const TutorPersonaIdSchema = z.enum([
+  "sathi_friend",
+  "priya_coach",
+  "vikram_interviewer",
+  "ananya_roleplay",
+]);
+
 /**
  * POST /api/v1/voice/sessions
  * Creates a new voice session. lessonId OR scenario must be provided;
@@ -126,6 +133,7 @@ export const CreateVoiceSessionSchema = z.object({
   lessonId: z.string().uuid("lessonId must be a valid UUID").optional(),
   scenario: z.string().trim().min(2).max(120).optional(),
   level: ProficiencyLevelSchema.optional(),
+  personaId: TutorPersonaIdSchema.optional(),
 }).refine(
   (data) => data.lessonId !== undefined || data.scenario !== undefined,
   { message: "Either lessonId or scenario must be provided" },
@@ -173,6 +181,7 @@ export const ListLessonsQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(12),
 });
 
+export type TutorPersonaIdInput = z.infer<typeof TutorPersonaIdSchema>;
 export type CreateVoiceSessionInput = z.infer<typeof CreateVoiceSessionSchema>;
 export type VoiceTurnTextInput = z.infer<typeof VoiceTurnTextSchema>;
 export type VoiceTurnAudioInput = z.infer<typeof VoiceTurnAudioSchema>;

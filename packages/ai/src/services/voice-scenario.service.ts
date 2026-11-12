@@ -1,11 +1,21 @@
 import type { GoogleGenAI } from "@google/genai";
-import type { ProficiencyLevel } from "@english-sathi/shared-types";
+import type {
+    ContextualVocabularyItemDTO,
+    ProficiencyLevel,
+    SpeakingSpeed,
+    TutorPersonaId,
+} from "@english-sathi/shared-types";
 import {
     parseRawJsonObject,
-    TutorTurnResponseSchema,
     type TutorTurnResponse,
 } from "../schemas/tutor-response.schema";
 import { buildTutorSystemPrompt } from "../prompts/tutor.prompt";
+import { resolvePersonaForScenario } from "../personas/tutor-personas";
+import { findScenarioContext } from "../scenarios/conversation-scenarios";
+import {
+    shouldAllowHindiScaffolding,
+    validateAndNormalizeTutorResponse,
+} from "../validators/tutor-response.validator";
 import {
     buildNormalizedTextContents,
     createGeminiClient,
@@ -23,18 +33,29 @@ export interface LessonContext {
     promptStarter: string;
     objectives?: string[];
     keyPhrases?: string[];
+    personaId?: TutorPersonaId;
+    roleplayRole?: string;
+    learnerRole?: string;
+    vocabulary?: Array<{
+        word: string;
+        meaning: string;
+        hindiMeaning?: string;
+        example?: string;
+    }>;
 }
 
 export interface LearnerContext {
     name?: string;
     level: ProficiencyLevel;
     nativeLanguage?: string;
+    speakingSpeed?: SpeakingSpeed;
     recurringMistakes?: string[];
 }
 
 export interface VoiceScenarioParams {
     lesson: LessonContext;
     learner: LearnerContext;
+    personaId?: TutorPersonaId | null;
 }
 
 export interface AudioTurnParams {
@@ -43,6 +64,7 @@ export interface AudioTurnParams {
     mimeType: "audio/webm" | "audio/ogg" | "audio/wav";
     learner: LearnerContext;
     scenario: string;
+    personaId?: TutorPersonaId | null;
     messageHistory?: Array<{ role: "user" | "model"; content: string }>;
 }
 
@@ -58,9 +80,9 @@ export interface AudioTurnResult extends TutorTurnResponse {
  * Voice Scenario Service — session-level AI helpers.
  *
  * Responsibilities:
- * 1. Generate a lesson-aware opening greeting (Sathi as the scenario participant).
+ * 1. Generate a persona- & scenario-aware opening greeting with preview vocabulary.
  * 2. Process native audio turns via Gemini multimodal with strict clarity checks
- *    (asks learner to repeat cleanly instead of guessing unclear/inaudible audio).
+ *    and validated pedagogical responses (grammar correction, Hindi tips, vocabulary).
  */
 export class VoiceScenarioService {
     private ai: GoogleGenAI | null = null;
@@ -73,26 +95,36 @@ export class VoiceScenarioService {
 
     // ─── Opening Greeting ────────────────────────────────────────────────────
 
-    /**
-     * Generates Sathi's opening message when a voice session starts.
-     * Uses the lesson's `promptStarter` as the seed line and enriches it with
-     * learner context. Falls back to a formatted version of promptStarter when
-     * no API key is configured.
-     */
     async generateOpeningGreeting(params: VoiceScenarioParams): Promise<TutorTurnResponse> {
-        const { lesson, learner } = params;
+        const { lesson, learner, personaId } = params;
+        const resolvedPersona = resolvePersonaForScenario({
+            personaId: personaId ?? lesson.personaId,
+            category: lesson.category,
+            topic: lesson.title,
+            level: learner.level,
+        });
 
         if (!this.ai) {
-            return this.buildFallbackGreeting(lesson, learner);
+            return this.buildFallbackGreeting(lesson, learner, resolvedPersona.id);
         }
 
         try {
             const systemInstruction = buildTutorSystemPrompt({
                 learnerLevel: learner.level,
                 topic: `${lesson.category}: ${lesson.title}`,
+                category: lesson.category,
                 nativeLanguage: learner.nativeLanguage,
                 learnerName: learner.name,
+                speakingSpeed: learner.speakingSpeed,
                 recurringMistakes: learner.recurringMistakes,
+                personaId: resolvedPersona.id,
+                scenarioSpec: {
+                    aiRole: lesson.roleplayRole,
+                    learnerRole: lesson.learnerRole,
+                    objectives: lesson.objectives,
+                    keyPhrases: lesson.keyPhrases,
+                    vocabulary: lesson.vocabulary,
+                },
             });
 
             const objectiveHint = lesson.objectives?.length
@@ -104,11 +136,11 @@ export class VoiceScenarioService {
                 : "";
 
             const userPrompt = [
-                `You are starting the session. Open with this scenario starter line, then invite the learner to respond:`,
+                `You are starting the session. Open warmly in character using this scenario starter line, then ask the learner's first turn in 'suggestedFollowUpQuestion':`,
                 `"${lesson.promptStarter}"`,
                 objectiveHint,
                 phrasesHint,
-                `Respond only with the JSON structure specified. Set 'feedback' to [] and 'score' to null — this is an opening, not an evaluation turn.`,
+                `Respond only with the JSON structure specified. Set 'feedback' to [] and 'score' to null — this is an opening, not an evaluation turn. You may include 1 helpful word in 'contextualVocabulary'.`,
             ]
                 .filter(Boolean)
                 .join("\n");
@@ -120,30 +152,27 @@ export class VoiceScenarioService {
             });
 
             const parsed = parseRawJsonObject(rawText);
-            const validated = TutorTurnResponseSchema.safeParse(parsed);
-            if (validated.success) {
+            const validated = validateAndNormalizeTutorResponse(parsed, {
+                learnerLevel: learner.level,
+                nativeLanguage: learner.nativeLanguage,
+                isOpeningGreeting: true,
+            });
+            if (validated.ok) {
                 return validated.data;
             }
 
-            console.warn("[VoiceScenarioService] Opening greeting validation failed, using fallback:", validated.error);
+            console.warn("[VoiceScenarioService] Opening greeting validation failed, using fallback:", validated.reasons);
         } catch (error) {
             console.warn("[VoiceScenarioService] Gemini API error for opening greeting:", error);
         }
 
-        return this.buildFallbackGreeting(lesson, learner);
+        return this.buildFallbackGreeting(lesson, learner, resolvedPersona.id);
     }
 
     // ─── Audio Turn Processing ───────────────────────────────────────────────
 
-    /**
-     * Processes a base64-encoded audio turn through Gemini multimodal.
-     *
-     * Tuned for high-accuracy Indian English listening and strict anti-guessing:
-     * if audio is muffled, quiet, cut off, or noisy, Gemini returns `audioClear: false`
-     * and asks the learner to repeat instead of fabricating words or advancing the topic.
-     */
     async processAudioTurn(params: AudioTurnParams): Promise<AudioTurnResult> {
-        const { audioBase64, mimeType, learner, scenario, messageHistory = [] } = params;
+        const { audioBase64, mimeType, learner, scenario, personaId, messageHistory = [] } = params;
 
         if (!this.ai) {
             return {
@@ -154,12 +183,16 @@ export class VoiceScenarioService {
         }
 
         try {
+            const catalogMatch = findScenarioContext(scenario);
             const systemInstruction = buildTutorSystemPrompt({
                 learnerLevel: learner.level,
                 topic: scenario,
+                category: catalogMatch?.category,
                 nativeLanguage: learner.nativeLanguage,
                 learnerName: learner.name,
+                speakingSpeed: learner.speakingSpeed,
                 recurringMistakes: learner.recurringMistakes,
+                personaId: personaId ?? catalogMatch?.recommendedPersonaId,
             });
 
             const historyContents = buildNormalizedTextContents(
@@ -169,8 +202,6 @@ export class VoiceScenarioService {
                 })),
                 scenario,
             );
-            // If history ended on a "user" message before our new audio user turn,
-            // append a neutral separator so roles still alternate cleanly.
             if (historyContents.length > 0 && historyContents[historyContents.length - 1].role === "user") {
                 historyContents.push({
                     role: "model",
@@ -186,13 +217,13 @@ export class VoiceScenarioService {
                 `4. CLARITY GATE: If the audio is silent, mostly background noise, too faint, muffled, cut off, or too unclear to understand confidently:`,
                 `   - Set "audioClear": false`,
                 `   - Set "transcript": ""`,
-                `   - Set "feedback": [] and "score": null`,
+                `   - Set "feedback": [], "contextualVocabulary": [], and "score": null`,
                 `   - In "reply", honestly tell the student their voice was not clear enough (say whether it sounded too quiet, noisy, or cut off) and politely ask them to repeat that response clearly — do NOT praise what wasn't heard and do NOT move on to a new question/topic.`,
                 `   - In "suggestedFollowUpQuestion", gently ask them to try saying it again clearly.`,
                 `5. If the audio IS clearly audible:`,
                 `   - Set "audioClear": true`,
-                `   - Set "transcript" to the exact verbatim words the learner spoke (preserve grammatical slips accurately so you can correct them).`,
-                `   - Provide your concise reply, accurate feedback on what they actually said, score, encouragement, and ONE relevant suggestedFollowUpQuestion.`,
+                `   - Set "transcript" to the exact verbatim words the learner spoke (preserve grammatical slips accurately so you can correct them without altering their meaning).`,
+                `   - Provide your concise in-character reply, accurate intent-preserving feedback (with 'example'), 1-2 contextualVocabulary items, score, encouragement, and ONE relevant suggestedFollowUpQuestion.`,
             ].join("\n");
 
             const userTurnParts = [
@@ -217,12 +248,15 @@ export class VoiceScenarioService {
             });
 
             const parsed = parseRawJsonObject(rawText);
+            const rawTranscript =
+                typeof parsed?.["transcript"] === "string" ? parsed["transcript"].trim() : "";
 
-            const validated = TutorTurnResponseSchema.safeParse(parsed);
-            if (validated.success) {
-                const rawTranscript =
-                    typeof parsed?.["transcript"] === "string" ? parsed["transcript"].trim() : "";
+            const validated = validateAndNormalizeTutorResponse(parsed, {
+                learnerLevel: learner.level,
+                nativeLanguage: learner.nativeLanguage,
+            });
 
+            if (validated.ok) {
                 if (
                     validated.data.audioClear === false ||
                     rawTranscript.length === 0 ||
@@ -243,7 +277,7 @@ export class VoiceScenarioService {
                 };
             }
 
-            console.warn("[VoiceScenarioService] Audio turn schema validation failed:", validated.error);
+            console.warn("[VoiceScenarioService] Audio turn validation failed:", validated.reasons);
         } catch (error) {
             console.warn("[VoiceScenarioService] Gemini audio API error:", error);
         }
@@ -257,13 +291,41 @@ export class VoiceScenarioService {
 
     // ─── Private fallbacks ───────────────────────────────────────────────────
 
-    private buildFallbackGreeting(lesson: LessonContext, learner: LearnerContext): TutorTurnResponse {
+    private buildFallbackGreeting(
+        lesson: LessonContext,
+        learner: LearnerContext,
+        personaId: TutorPersonaId,
+    ): TutorTurnResponse {
         const name = learner.name ? `, ${learner.name}` : "";
+        const allowHindi = shouldAllowHindiScaffolding(learner.level, learner.nativeLanguage);
+        const catalogMatch = findScenarioContext(lesson.title);
+
+        const rawVocab =
+            lesson.vocabulary?.length
+                ? lesson.vocabulary.slice(0, 1).map(
+                      (v): ContextualVocabularyItemDTO => ({
+                          word: v.word,
+                          meaning: v.meaning,
+                          hindiMeaning: allowHindi ? v.hindiMeaning : undefined,
+                          example: v.example ?? `Try using "${v.word}" in your reply today.`,
+                      }),
+                  )
+                : catalogMatch?.targetVocabulary.slice(0, 1).map((v) => ({
+                      ...v,
+                      hindiMeaning: allowHindi ? v.hindiMeaning : undefined,
+                  })) ?? [];
+
+        const encouragementPrefix =
+            personaId === "vikram_interviewer"
+                ? "Let's focus on clear, confident communication"
+                : "Take your time — there are no wrong answers here";
+
         return {
             reply: `${lesson.promptStarter}`,
             feedback: [],
+            contextualVocabulary: rawVocab,
             score: undefined,
-            encouragement: `Welcome${name}! Take your time — there are no wrong answers here.`,
+            encouragement: `Welcome${name}! ${encouragementPrefix}.`,
             suggestedFollowUpQuestion: "Ready to begin? Just start talking when you feel comfortable!",
         };
     }
@@ -288,10 +350,10 @@ export class VoiceScenarioService {
             audioClear: false,
             reply: replies[turnCount % replies.length],
             feedback: [],
+            contextualVocabulary: [],
             score: undefined,
             encouragement: "No worries — clear speech matters more than speed. Take a moment and try again!",
             suggestedFollowUpQuestion: followUps[turnCount % followUps.length],
         };
     }
 }
-

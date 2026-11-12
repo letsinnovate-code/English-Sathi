@@ -93,8 +93,17 @@ describe("Voice Session Validation Schemas", () => {
       lessonId: VALID_UUID,
       scenario: "Ordering at a café",
       level: "B1",
+      personaId: "ananya_roleplay",
     });
     expect(result.success).toBe(true);
+  });
+
+  it("rejects CreateVoiceSession with unknown personaId", () => {
+    const result = CreateVoiceSessionSchema.safeParse({
+      scenario: "Daily English Conversation",
+      personaId: "unknown_persona",
+    });
+    expect(result.success).toBe(false);
   });
 
   it("rejects CreateVoiceSession with neither lessonId nor scenario", () => {

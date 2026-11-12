@@ -129,6 +129,32 @@ export interface ApiResponse<T> {
   message?: string;
 }
 
+// ─── Milestone 4: Teaching Engine types ─────────────────────────────────────
+
+export type TutorPersonaId =
+  | "sathi_friend"
+  | "priya_coach"
+  | "vikram_interviewer"
+  | "ananya_roleplay";
+
+export interface TutorPersonaDTO {
+  id: TutorPersonaId;
+  name: string;
+  title: string;
+  tagline: string;
+  styleSummary: string;
+  recommendedLevels: ProficiencyLevel[];
+  bestForCategories: string[];
+}
+
+export interface ContextualVocabularyItemDTO {
+  word: string;
+  partOfSpeech?: string;
+  meaning: string;
+  hindiMeaning?: string;
+  example: string;
+}
+
 // ─── Milestone 3: Voice Session types ────────────────────────────────────────
 
 /** Mirrors the Prisma `SessionStatus` enum. */
@@ -151,6 +177,7 @@ export interface VoiceSessionDTO {
   provider: string;
   scenario: string | null;
   level: ProficiencyLevel | null;
+  personaId?: TutorPersonaId | null;
   durationSeconds: number;
   startedAt: string | null;
   endedAt: string | null;
@@ -203,8 +230,16 @@ export interface LessonContentDTO {
   objectives: string[];
   keyPhrases: string[];
   promptStarter: string;
+  personaId?: TutorPersonaId;
+  roleplayRole?: string;
+  learnerRole?: string;
   /** Optional vocabulary hints for the AI tutor. */
-  vocabulary?: Array<{ word: string; meaning: string }>;
+  vocabulary?: Array<{
+    word: string;
+    meaning: string;
+    hindiMeaning?: string;
+    example?: string;
+  }>;
 }
 
 /** Paginated list of lessons. */
@@ -237,10 +272,14 @@ export interface VoiceTurnResultDTO {
   userTranscript?: string;
   /** False when the learner's speech was unclear/inaudible and Sathi asked them to repeat. */
   audioClear?: boolean;
+  /** Active tutor persona used to frame the reply. */
+  personaId?: TutorPersonaId;
   /** The AI tutor's textual reply (also synthesised as speech by the client). */
   reply: string;
   /** Pedagogical feedback items for the user's utterance. */
   feedback: VoiceFeedbackItemDTO[];
+  /** Useful contextual vocabulary tied to this turn and scenario. */
+  contextualVocabulary?: ContextualVocabularyItemDTO[];
   /** Turn score 0-100 (optional — may be absent for opening greetings). */
   score?: number;
   /** Short encouraging phrase. */
@@ -268,6 +307,7 @@ export interface VoiceFeedbackItemDTO {
   suggestion: string;
   explanation: string;
   hindiExplanation?: string;
+  example?: string;
 }
 
 // ─── WebSocket event payload types ───────────────────────────────────────────

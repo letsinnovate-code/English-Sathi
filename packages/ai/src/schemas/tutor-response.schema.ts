@@ -11,16 +11,27 @@ export const FeedbackCategorySchema = z.enum([
     "natural_expression",
 ]);
 
+const optionalTrimmedString = z
+    .string()
+    .nullable()
+    .optional()
+    .transform((val) => (typeof val === "string" && val.trim().length > 0 ? val.trim() : undefined));
+
 export const TutorFeedbackItemSchema = z.object({
     category: FeedbackCategorySchema,
     original: z.string().min(1, "Original phrase cannot be empty"),
     suggestion: z.string().min(1, "Correction/suggestion cannot be empty"),
     explanation: z.string().min(1, "Explanation is required"),
-    hindiExplanation: z
-        .string()
-        .nullable()
-        .optional()
-        .transform((val) => (typeof val === "string" && val.trim().length > 0 ? val : undefined)),
+    hindiExplanation: optionalTrimmedString,
+    example: optionalTrimmedString,
+});
+
+export const ContextualVocabularyItemSchema = z.object({
+    word: z.string().min(1, "Vocabulary word or phrase is required"),
+    partOfSpeech: optionalTrimmedString,
+    meaning: z.string().min(1, "Simple English meaning is required"),
+    hindiMeaning: optionalTrimmedString,
+    example: z.string().min(1, "Contextual example sentence is required"),
 });
 
 /**
@@ -29,6 +40,7 @@ export const TutorFeedbackItemSchema = z.object({
 export const TutorTurnResponseSchema = z.object({
     reply: z.string().min(1, "Tutor conversational reply is required"),
     feedback: z.array(TutorFeedbackItemSchema).default([]),
+    contextualVocabulary: z.array(ContextualVocabularyItemSchema).default([]),
     score: z
         .number()
         .min(0)
@@ -47,6 +59,7 @@ export const TutorTurnResponseSchema = z.object({
 
 export type FeedbackCategory = z.infer<typeof FeedbackCategorySchema>;
 export type TutorFeedbackItem = z.infer<typeof TutorFeedbackItemSchema>;
+export type ContextualVocabularyItem = z.infer<typeof ContextualVocabularyItemSchema>;
 export type TutorTurnResponse = z.infer<typeof TutorTurnResponseSchema>;
 
 /**
