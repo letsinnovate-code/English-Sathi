@@ -114,3 +114,65 @@ export type OnboardingInput = z.infer<typeof OnboardingSchema>;
 export type UpdateProfileInput = z.infer<typeof UpdateProfileSchema>;
 export type StartSessionInput = z.infer<typeof StartSessionSchema>;
 export type SendMessageInput = z.infer<typeof SendMessageSchema>;
+
+// ─── Milestone 3: Voice Session schemas ──────────────────────────────────────
+
+/**
+ * POST /api/v1/voice/sessions
+ * Creates a new voice session. lessonId OR scenario must be provided;
+ * providing both is allowed (scenario is derived from lesson if absent).
+ */
+export const CreateVoiceSessionSchema = z.object({
+  lessonId: z.string().uuid("lessonId must be a valid UUID").optional(),
+  scenario: z.string().trim().min(2).max(120).optional(),
+  level: ProficiencyLevelSchema.optional(),
+}).refine(
+  (data) => data.lessonId !== undefined || data.scenario !== undefined,
+  { message: "Either lessonId or scenario must be provided" },
+);
+
+/**
+ * WebSocket event: turn:text
+ * Learner submits a text utterance (text-mode practice or accessibility fallback).
+ */
+export const VoiceTurnTextSchema = z.object({
+  sessionId: z.string().uuid("sessionId must be a valid UUID"),
+  text: z.string().trim().min(1, "Text cannot be empty").max(2000),
+  audioDurationSeconds: z.number().nonnegative().optional().default(0),
+});
+
+/**
+ * WebSocket event: turn:audio
+ * Learner submits a base64-encoded audio blob.
+ */
+export const VoiceTurnAudioSchema = z.object({
+  sessionId: z.string().uuid("sessionId must be a valid UUID"),
+  audioBase64: z.string().min(1, "Audio data cannot be empty"),
+  mimeType: z.enum(["audio/webm", "audio/ogg", "audio/wav"]),
+  durationSeconds: z.number().positive("Audio duration must be positive").max(300),
+});
+
+/**
+ * WebSocket event / DELETE /api/v1/voice/sessions/:id
+ * Ends a voice session (also used for inactivity timeout triggered server-side).
+ */
+export const EndVoiceSessionSchema = z.object({
+  sessionId: z.string().uuid("sessionId must be a valid UUID"),
+  reason: z.enum(["user_ended", "quota_exceeded", "inactivity_timeout", "error"]).default("user_ended"),
+});
+
+/**
+ * GET /api/v1/lessons — query params
+ */
+export const ListLessonsQuerySchema = z.object({
+  level: ProficiencyLevelSchema.optional(),
+  category: z.string().trim().max(80).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(12),
+});
+
+export type CreateVoiceSessionInput = z.infer<typeof CreateVoiceSessionSchema>;
+export type VoiceTurnTextInput = z.infer<typeof VoiceTurnTextSchema>;
+export type VoiceTurnAudioInput = z.infer<typeof VoiceTurnAudioSchema>;
+export type EndVoiceSessionInput = z.infer<typeof EndVoiceSessionSchema>;
+export type ListLessonsQueryInput = z.infer<typeof ListLessonsQuerySchema>;
