@@ -156,6 +156,7 @@ import type {
   LessonDetailDTO,
   LessonsListDTO,
   ProficiencyLevel,
+  TutorPersonaDTO,
   UserProfileDTO,
   VoiceQuotaSummaryDTO,
   VoiceSessionDetailDTO,
@@ -223,6 +224,10 @@ export async function apiGetDashboard(): Promise<DashboardSummaryDTO> {
 }
 
 // ─── Lessons & Voice Sessions ───────────────────────────────────────────────
+
+export async function apiListPersonas(): Promise<TutorPersonaDTO[]> {
+  return request<TutorPersonaDTO[]>("/lessons/personas");
+}
 
 export async function apiListLessons(params?: {
   level?: ProficiencyLevel;

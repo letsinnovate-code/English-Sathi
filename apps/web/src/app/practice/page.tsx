@@ -5,8 +5,12 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
 import type {
+  ContextualVocabularyItemDTO,
   LessonDetailDTO,
+  ProficiencyLevel,
   StarterLessonSummaryDTO,
+  TutorPersonaDTO,
+  TutorPersonaId,
   VoiceFeedbackItemDTO,
   VoiceQuotaSummaryDTO,
   VoiceSessionDTO,
@@ -25,6 +29,7 @@ import {
   apiGetVoiceQuota,
   apiGetVoiceSession,
   apiListLessons,
+  apiListPersonas,
   apiListVoiceSessions,
   ensureAccessToken,
   getApiBaseUrl,
@@ -40,7 +45,9 @@ import {
   type LiveCaptionsResult,
 } from "@/lib/voice-speech";
 import { AudioWaveform } from "@/components/voice/AudioWaveform";
+import { FeedbackCardList } from "@/components/voice/FeedbackCardList";
 import { TranscriptPanel, type TranscriptEntry } from "@/components/voice/TranscriptPanel";
+import { VocabularyCardList } from "@/components/voice/VocabularyCardList";
 
 type StudioMode = "setup" | "live" | "summary";
 type MicPermission = "prompt" | "granted" | "denied" | "unsupported";
@@ -76,7 +83,10 @@ function PracticeStudioInner() {
   // ── Setup state ──
   const [mode, setMode] = useState<StudioMode>("setup");
   const [lessons, setLessons] = useState<StarterLessonSummaryDTO[]>([]);
+  const [personas, setPersonas] = useState<TutorPersonaDTO[]>([]);
   const [selectedLesson, setSelectedLesson] = useState<LessonDetailDTO | null>(null);
+  const [selectedPersonaId, setSelectedPersonaId] = useState<TutorPersonaId | null>(null);
+  const [levelFilter, setLevelFilter] = useState<"ALL" | ProficiencyLevel>("ALL");
   const [useFreeTalk, setUseFreeTalk] = useState(false);
   const [customScenario, setCustomScenario] = useState("Daily English Conversation");
   const [quota, setQuota] = useState<VoiceQuotaSummaryDTO | null>(null);
@@ -140,24 +150,28 @@ function PracticeStudioInner() {
       setSetupLoading(true);
       setError("");
       try {
-        const [quotaRes, lessonsRes] = await Promise.all([
+        const [quotaRes, lessonsRes, personasRes] = await Promise.all([
           apiGetVoiceQuota(),
           apiListLessons({ pageSize: 20 }),
+          apiListPersonas().catch(() => []),
         ]);
         if (cancelled) return;
         setQuota(quotaRes);
         setLessons(lessonsRes.data);
+        setPersonas(personasRes);
 
         if (lessonParam) {
           const detail = await apiGetLesson(lessonParam);
           if (!cancelled) {
             setSelectedLesson(detail);
+            setSelectedPersonaId(detail.content.personaId ?? null);
             setUseFreeTalk(false);
           }
         } else if (lessonsRes.data.length > 0) {
           const firstDetail = await apiGetLesson(lessonsRes.data[0].slug);
           if (!cancelled) {
             setSelectedLesson(firstDetail);
+            setSelectedPersonaId(firstDetail.content.personaId ?? null);
             setUseFreeTalk(false);
           }
         } else {
@@ -337,15 +351,20 @@ function PracticeStudioInner() {
         setSession(payload.session);
         setQuota(payload.quota);
 
+        const resolvedGreetingPersona =
+          payload.openingGreeting.personaId ?? payload.session.personaId;
+
         setEntries((prev) => {
           if (prev.length > 0) return prev;
           return [
             {
               id: `msg-open-${payload.openingGreeting.messageSequence}`,
               role: "ASSISTANT",
+              ...(resolvedGreetingPersona ? { personaId: resolvedGreetingPersona } : {}),
               content: payload.openingGreeting.reply,
               encouragement: payload.openingGreeting.encouragement,
               followUpQuestion: payload.openingGreeting.followUpQuestion,
+              contextualVocabulary: payload.openingGreeting.contextualVocabulary,
               createdAt: new Date().toISOString(),
             },
           ];
@@ -382,10 +401,12 @@ function PracticeStudioInner() {
             {
               id: `msg-ai-${payload.messageSequence}-${Date.now()}`,
               role: "ASSISTANT",
+              ...(payload.personaId ? { personaId: payload.personaId } : {}),
               content: payload.reply,
               encouragement: payload.encouragement,
               followUpQuestion: payload.followUpQuestion,
               feedback: payload.feedback,
+              contextualVocabulary: payload.contextualVocabulary,
               score: payload.score,
               createdAt: new Date().toISOString(),
             },
@@ -425,6 +446,7 @@ function PracticeStudioInner() {
     try {
       const detail = await apiGetLesson(slug);
       setSelectedLesson(detail);
+      setSelectedPersonaId(detail.content.personaId ?? null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load lesson details.");
     }
@@ -439,22 +461,27 @@ function PracticeStudioInner() {
         ? {
             scenario: customScenario.trim() || "Daily English Conversation",
             level: profile?.proficiencyLevel !== "UNKNOWN" ? profile?.proficiencyLevel : undefined,
+            ...(selectedPersonaId ? { personaId: selectedPersonaId } : {}),
           }
         : {
             lessonId: selectedLesson?.id,
             scenario: selectedLesson?.title,
             level: selectedLesson?.level,
+            ...(selectedPersonaId ? { personaId: selectedPersonaId } : {}),
           };
 
       const created = await apiCreateVoiceSession(dto);
       setQuota(created.quota);
 
+      const initialPersonaId = created.openingGreeting.personaId ?? created.session.personaId;
       const initialGreeting: TranscriptEntry = {
         id: `msg-open-${created.openingGreeting.messageSequence}`,
         role: "ASSISTANT",
+        ...(initialPersonaId ? { personaId: initialPersonaId } : {}),
         content: created.openingGreeting.reply,
         encouragement: created.openingGreeting.encouragement,
         followUpQuestion: created.openingGreeting.followUpQuestion,
+        contextualVocabulary: created.openingGreeting.contextualVocabulary,
         createdAt: new Date().toISOString(),
       };
 
@@ -771,17 +798,45 @@ function PracticeStudioInner() {
     }
   }
 
-  // ── Summary metrics ──
+  // ── Summary metrics & Persona helpers ──
   const summaryStats = useMemo(() => {
     const userTurns = entries.filter((e) => e.role === "USER").length;
     const allFeedback: VoiceFeedbackItemDTO[] = entries.flatMap((e) => e.feedback ?? []);
+    const vocabMap = new Map<string, ContextualVocabularyItemDTO>();
+    for (const entry of entries) {
+      for (const vocab of entry.contextualVocabulary ?? []) {
+        const key = vocab.word.toLowerCase();
+        if (!vocabMap.has(key)) {
+          vocabMap.set(key, vocab);
+        }
+      }
+    }
+    const learnedVocabulary = Array.from(vocabMap.values());
     const scores = entries
       .map((e) => e.score)
       .filter((s): s is number => typeof s === "number");
     const avgScore =
       scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
-    return { userTurns, allFeedback, avgScore };
+    return { userTurns, allFeedback, learnedVocabulary, avgScore };
   }, [entries]);
+
+  const personaNamesMap = useMemo(() => {
+    const map: Partial<Record<TutorPersonaId, string>> = {};
+    for (const persona of personas) {
+      map[persona.id] = persona.name;
+    }
+    return map;
+  }, [personas]);
+
+  const activePersona = useMemo(() => {
+    const targetId = session?.personaId ?? selectedPersonaId ?? "sathi_friend";
+    return personas.find((p) => p.id === targetId) ?? null;
+  }, [personas, session?.personaId, selectedPersonaId]);
+
+  const filteredLessons = useMemo(() => {
+    if (levelFilter === "ALL") return lessons;
+    return lessons.filter((l) => l.level === levelFilter);
+  }, [lessons, levelFilter]);
 
   if (state.status === "loading" || (mode === "setup" && setupLoading)) {
     return (
@@ -800,7 +855,7 @@ function PracticeStudioInner() {
     if (!isSocketConnected) return { cls: "", label: "Connecting…" };
     if (isRecording) return { cls: "recording", label: "Listening" };
     if (isThinking) return { cls: "", label: "Thinking…" };
-    if (isAiSpeaking) return { cls: "speaking", label: "Sathi Speaking" };
+    if (isAiSpeaking) return { cls: "speaking", label: `${activePersona?.name ?? "Sathi"} Speaking` };
     if (isInterrupted) return { cls: "interrupted", label: "Interrupted" };
     return { cls: "", label: "Ready" };
   })();
@@ -890,11 +945,24 @@ function PracticeStudioInner() {
             <div>
               <h1 style={{ fontSize: "1.4rem", fontWeight: 700 }}>Choose a Speaking Topic</h1>
               <p className="page-subtitle">
-                Practice speaking naturally with Sathi. Corrections appear live in English and Hindi.
+                Practice real-world scenarios or open conversation. Corrections adapt to your CEFR level.
               </p>
 
+              <div className="level-filter-row" role="group" aria-label="Filter scenarios by level">
+                {(["ALL", "A1", "A2", "B1", "B2", "C1"] as const).map((lvl) => (
+                  <button
+                    key={lvl}
+                    type="button"
+                    className={`level-filter-btn${levelFilter === lvl ? " active" : ""}`}
+                    onClick={() => setLevelFilter(lvl)}
+                  >
+                    {lvl === "ALL" ? `All Scenarios (${lessons.length})` : lvl}
+                  </button>
+                ))}
+              </div>
+
               <div className="lesson-select-grid">
-                {lessons.map((lesson) => {
+                {filteredLessons.map((lesson) => {
                   const isSelected = !useFreeTalk && selectedLesson?.id === lesson.id;
                   return (
                     <button
@@ -915,7 +983,10 @@ function PracticeStudioInner() {
                 <button
                   type="button"
                   className={`lesson-option${useFreeTalk ? " selected" : ""}`}
-                  onClick={() => setUseFreeTalk(true)}
+                  onClick={() => {
+                    setUseFreeTalk(true);
+                    setSelectedPersonaId(null);
+                  }}
                 >
                   <div className="lesson-badge">OPEN</div>
                   <div style={{ fontWeight: 600, fontSize: "0.95rem" }}>Free Conversation</div>
@@ -940,9 +1011,31 @@ function PracticeStudioInner() {
             ) : (
               selectedLesson && (
                 <div style={{ background: "var(--bg)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "1rem" }}>
-                  <div style={{ fontWeight: 700, marginBottom: "0.5rem" }}>
-                    Lesson Guide: {selectedLesson.title}
+                  <div style={{ fontWeight: 700, marginBottom: "0.6rem" }}>
+                    Scenario Guide: {selectedLesson.title}
                   </div>
+
+                  {(selectedLesson.content.roleplayRole || selectedLesson.content.learnerRole) && (
+                    <div className="roleplay-brief-grid">
+                      {selectedLesson.content.roleplayRole && (
+                        <div className="roleplay-chip">
+                          <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "var(--primary)", textTransform: "uppercase" }}>
+                            AI Roleplay Character
+                          </div>
+                          <div style={{ marginTop: "0.2rem" }}>{selectedLesson.content.roleplayRole}</div>
+                        </div>
+                      )}
+                      {selectedLesson.content.learnerRole && (
+                        <div className="roleplay-chip">
+                          <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "#0f766e", textTransform: "uppercase" }}>
+                            Your Role
+                          </div>
+                          <div style={{ marginTop: "0.2rem" }}>{selectedLesson.content.learnerRole}</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {selectedLesson.content.objectives.length > 0 && (
                     <div style={{ marginBottom: "0.65rem" }}>
                       <div style={{ fontSize: "0.8rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>
@@ -955,8 +1048,9 @@ function PracticeStudioInner() {
                       </ul>
                     </div>
                   )}
+
                   {selectedLesson.content.keyPhrases.length > 0 && (
-                    <div>
+                    <div style={{ marginBottom: selectedLesson.content.vocabulary?.length ? "0.75rem" : 0 }}>
                       <div style={{ fontSize: "0.8rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", marginBottom: "0.3rem" }}>
                         Helpful Phrases
                       </div>
@@ -969,8 +1063,55 @@ function PracticeStudioInner() {
                       </div>
                     </div>
                   )}
+
+                  {selectedLesson.content.vocabulary && selectedLesson.content.vocabulary.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: "0.8rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", marginBottom: "0.35rem" }}>
+                        Key Vocabulary Preview
+                      </div>
+                      <VocabularyCardList items={selectedLesson.content.vocabulary} layout="grid" />
+                    </div>
+                  )}
                 </div>
               )
+            )}
+
+            {personas.length > 0 && (
+              <div>
+                <div style={{ fontSize: "0.95rem", fontWeight: 700 }}>Choose Your AI Tutor Persona</div>
+                <p style={{ fontSize: "0.82rem", color: "var(--text-muted)", marginTop: "0.15rem" }}>
+                  Switch teaching tone anytime — friendly everyday chat, structured coaching, realistic roleplay, or interview prep.
+                </p>
+
+                <div className="persona-select-grid">
+                  {personas.map((persona) => {
+                    const effectiveSelectedId =
+                      selectedPersonaId ?? (!useFreeTalk ? selectedLesson?.content.personaId : null) ?? "sathi_friend";
+                    const isSelected = effectiveSelectedId === persona.id;
+                    const isRecommended = !useFreeTalk && selectedLesson?.content.personaId === persona.id;
+
+                    return (
+                      <button
+                        key={persona.id}
+                        type="button"
+                        className={`persona-card${isSelected ? " selected" : ""}`}
+                        onClick={() => setSelectedPersonaId(persona.id)}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.4rem", width: "100%" }}>
+                          <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>{persona.name}</span>
+                          {isRecommended && <span className="persona-rec-badge">Recommended</span>}
+                        </div>
+                        <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--primary)" }}>
+                          {persona.title}
+                        </div>
+                        <div style={{ fontSize: "0.79rem", color: "var(--text-muted)", lineHeight: 1.35 }}>
+                          {persona.tagline}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             )}
 
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap", borderTop: "1px solid var(--border)", paddingTop: "1.25rem" }}>
@@ -1011,10 +1152,30 @@ function PracticeStudioInner() {
         {/* ── LIVE STUDIO VIEW ── */}
         {mode === "live" && (
           <>
+            {(activePersona || (!useFreeTalk && selectedLesson?.id === session?.lessonId && (selectedLesson?.content.learnerRole || selectedLesson?.content.roleplayRole))) && (
+              <div className="studio-banner">
+                <div>
+                  <strong>{activePersona ? `🗣️ ${activePersona.name}` : "🗣️ Sathi"}</strong>
+                  {activePersona && (
+                    <span style={{ color: "var(--text-muted)", marginLeft: "0.45rem" }}>
+                      {activePersona.title}
+                    </span>
+                  )}
+                </div>
+                {!useFreeTalk && selectedLesson?.id === session?.lessonId && selectedLesson?.content.learnerRole && (
+                  <div style={{ color: "var(--text-muted)" }}>
+                    <strong>Your role:</strong> {selectedLesson.content.learnerRole}
+                  </div>
+                )}
+              </div>
+            )}
+
             <TranscriptPanel
               entries={entries}
               speakingSpeed={speakingSpeed}
               isThinking={isThinking}
+              personaNames={personaNamesMap}
+              defaultPersonaId={session?.personaId ?? selectedPersonaId}
             />
 
             <div className="voice-controls-card">
@@ -1141,24 +1302,18 @@ function PracticeStudioInner() {
                   No major errors flagged in this session. Keep speaking smoothly!
                 </div>
               ) : (
-                <div className="feedback-list">
-                  {summaryStats.allFeedback.map((item, idx) => (
-                    <div key={idx} className="feedback-card">
-                      <span className="feedback-badge">{item.category.replace("_", " ")}</span>
-                      <div className="feedback-diff">
-                        <span className="feedback-original">{item.original}</span>
-                        <span>→</span>
-                        <span className="feedback-suggestion">{item.suggestion}</span>
-                      </div>
-                      <p className="feedback-explanation">{item.explanation}</p>
-                      {item.hindiExplanation && (
-                        <p className="feedback-hindi">💡 {item.hindiExplanation}</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
+                <FeedbackCardList items={summaryStats.allFeedback} />
               )}
             </div>
+
+            {summaryStats.learnedVocabulary.length > 0 && (
+              <div>
+                <h2 style={{ fontSize: "1rem", fontWeight: 700, marginBottom: "0.75rem" }}>
+                  📚 Vocabulary Practiced ({summaryStats.learnedVocabulary.length})
+                </h2>
+                <VocabularyCardList items={summaryStats.learnedVocabulary} layout="grid" />
+              </div>
+            )}
 
             <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
               <button
