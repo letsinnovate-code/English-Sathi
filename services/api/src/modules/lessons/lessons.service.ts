@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
+import { listTutorPersonas, TUTOR_PERSONAS } from "@english-sathi/ai";
 import { PrismaService } from "../../infrastructure/database/prisma.service";
 import type { ListLessonsQueryInput } from "@english-sathi/validation";
 import type {
@@ -7,6 +8,8 @@ import type {
   LessonsListDTO,
   ProficiencyLevel,
   StarterLessonSummaryDTO,
+  TutorPersonaDTO,
+  TutorPersonaId,
 } from "@english-sathi/shared-types";
 
 const UUID_REGEX =
@@ -15,6 +18,10 @@ const UUID_REGEX =
 @Injectable()
 export class LessonsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  listPersonas(): TutorPersonaDTO[] {
+    return listTutorPersonas();
+  }
 
   async listLessons(query: ListLessonsQueryInput): Promise<LessonsListDTO> {
     const where = {
@@ -95,24 +102,49 @@ export class LessonsService {
     const toStringArray = (val: unknown): string[] =>
       Array.isArray(val) ? val.filter((x): x is string => typeof x === "string") : [];
 
+    const toNonEmptyString = (val: unknown): string | undefined =>
+      typeof val === "string" && val.trim().length > 0 ? val.trim() : undefined;
+
+    const rawPersonaId = obj["personaId"];
+    const personaId =
+      typeof rawPersonaId === "string" &&
+      Object.prototype.hasOwnProperty.call(TUTOR_PERSONAS, rawPersonaId)
+        ? (rawPersonaId as TutorPersonaId)
+        : undefined;
+
+    const roleplayRole = toNonEmptyString(obj["roleplayRole"]);
+    const learnerRole = toNonEmptyString(obj["learnerRole"]);
+
     const vocabulary = Array.isArray(obj["vocabulary"])
-      ? obj["vocabulary"].filter(
-          (v): v is { word: string; meaning: string } =>
-            Boolean(v) &&
-            typeof v === "object" &&
-            typeof (v as Record<string, unknown>)["word"] === "string" &&
-            typeof (v as Record<string, unknown>)["meaning"] === "string",
-        )
+      ? obj["vocabulary"].flatMap((v) => {
+          if (!v || typeof v !== "object") return [];
+          const rec = v as Record<string, unknown>;
+          const word = toNonEmptyString(rec["word"]);
+          const meaning = toNonEmptyString(rec["meaning"]);
+          if (!word || !meaning) return [];
+          const hindiMeaning = toNonEmptyString(rec["hindiMeaning"]);
+          const example = toNonEmptyString(rec["example"]);
+          return [
+            {
+              word,
+              meaning,
+              ...(hindiMeaning ? { hindiMeaning } : {}),
+              ...(example ? { example } : {}),
+            },
+          ];
+        })
       : undefined;
 
     return {
       objectives: toStringArray(obj["objectives"]),
       keyPhrases: toStringArray(obj["keyPhrases"]),
       promptStarter:
-        typeof obj["promptStarter"] === "string" && obj["promptStarter"].trim().length > 0
-          ? obj["promptStarter"]
-          : "Hello! Let's practice English together today. How are you doing?",
-      ...(vocabulary ? { vocabulary } : {}),
+        toNonEmptyString(obj["promptStarter"]) ??
+        "Hello! Let's practice English together today. How are you doing?",
+      ...(personaId ? { personaId } : {}),
+      ...(roleplayRole ? { roleplayRole } : {}),
+      ...(learnerRole ? { learnerRole } : {}),
+      ...(vocabulary && vocabulary.length > 0 ? { vocabulary } : {}),
     };
   }
 }

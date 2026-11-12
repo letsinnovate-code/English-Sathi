@@ -9,16 +9,22 @@ import { ConfigService } from "@nestjs/config";
 import {
   DEFAULT_GEMINI_MODEL,
   EnglishSathiAI,
+  resolvePersonaForScenario,
+  TUTOR_PERSONAS,
   VoiceScenarioService,
   type LessonContext,
+  type PromptScenarioSpec,
   type TutorTurnResponse,
 } from "@english-sathi/ai";
 import type {
+  ContextualVocabularyItemDTO,
   ConversationMessage,
   CreateVoiceSessionResponseDTO,
   LessonDetailDTO,
   ProficiencyLevel,
   SessionEvaluationDTO,
+  SpeakingSpeed,
+  TutorPersonaId,
   VoiceFeedbackItemDTO,
   VoiceMessageDTO,
   VoiceMessageRole,
@@ -111,6 +117,15 @@ export class VoiceService {
       (user.profile.proficiencyLevel === "UNKNOWN" ? "A1" : user.profile.proficiencyLevel)
     ) as ProficiencyLevel;
 
+    const resolvedPersona = resolvePersonaForScenario({
+      personaId: dto.personaId ?? lesson?.content.personaId,
+      category: lesson?.category,
+      topic: scenario,
+      level: resolvedLevel,
+    });
+    const speakingSpeed = (user.profile.speakingSpeed as SpeakingSpeed | undefined) ?? "NORMAL";
+    const recurringMistakes = await this.loadRecurringMistakes(userId);
+
     const sessionRecord = await this.prisma.voiceSession.create({
       data: {
         userId,
@@ -123,6 +138,12 @@ export class VoiceService {
           lessonTitle: lesson?.title ?? null,
           lessonCategory: lesson?.category ?? "Free Practice",
           promptStarter: lesson?.content.promptStarter ?? FREE_CONVERSATION_STARTER,
+          personaId: resolvedPersona.id,
+          ...(lesson?.content.roleplayRole ? { roleplayRole: lesson.content.roleplayRole } : {}),
+          ...(lesson?.content.learnerRole ? { learnerRole: lesson.content.learnerRole } : {}),
+          ...(lesson?.content.objectives?.length ? { objectives: lesson.content.objectives } : {}),
+          ...(lesson?.content.keyPhrases?.length ? { keyPhrases: lesson.content.keyPhrases } : {}),
+          ...(lesson?.content.vocabulary?.length ? { vocabulary: lesson.content.vocabulary } : {}),
         },
       },
     });
@@ -153,15 +174,21 @@ export class VoiceService {
             promptStarter: lesson.content.promptStarter,
             objectives: lesson.content.objectives,
             keyPhrases: lesson.content.keyPhrases,
+            personaId: resolvedPersona.id,
+            roleplayRole: lesson.content.roleplayRole,
+            learnerRole: lesson.content.learnerRole,
+            vocabulary: lesson.content.vocabulary,
           }
         : {
             title: scenario,
             category: "Free Conversation",
             promptStarter: FREE_CONVERSATION_STARTER,
+            personaId: resolvedPersona.id,
           };
 
       const greeting = await this.scenarioAI.generateOpeningGreeting({
         lesson: lessonCtx,
+        personaId: resolvedPersona.id,
         learner: {
           name: user.profile.displayName,
           level: resolvedLevel,
@@ -169,8 +196,12 @@ export class VoiceService {
             user.profile.explanationLanguage,
             user.profile.nativeLanguage,
           ),
+          speakingSpeed,
+          recurringMistakes,
         },
       });
+
+      const contextualVocabulary = greeting.contextualVocabulary ?? [];
 
       const openingMsg = await this.prisma.message.create({
         data: {
@@ -180,7 +211,9 @@ export class VoiceService {
           language: "en",
           content: greeting.reply,
           metadata: {
+            personaId: resolvedPersona.id,
             feedback: greeting.feedback,
+            contextualVocabulary,
             encouragement: greeting.encouragement,
             followUpQuestion: greeting.suggestedFollowUpQuestion,
           } as never,
@@ -188,8 +221,10 @@ export class VoiceService {
       });
 
       const openingGreeting: VoiceTurnResultDTO = {
+        personaId: resolvedPersona.id,
         reply: greeting.reply,
         feedback: [],
+        contextualVocabulary,
         encouragement: greeting.encouragement,
         followUpQuestion: greeting.suggestedFollowUpQuestion,
         messageSequence: openingMsg.sequence,
@@ -291,9 +326,22 @@ export class VoiceService {
     });
 
     const meta = this.asRecord(firstMsg?.metadata);
+    const sessionTeaching = this.extractSessionTeachingContext(updated.metadata);
+    const personaId =
+      this.parseValidPersonaId(meta["personaId"]) ??
+      sessionTeaching.personaId ??
+      resolvePersonaForScenario({
+        category: sessionTeaching.category,
+        topic: updated.scenario ?? undefined,
+        level: (updated.level as ProficiencyLevel | null) ?? undefined,
+      }).id;
+    const contextualVocabulary = this.extractContextualVocabulary(meta["contextualVocabulary"]);
+
     const openingGreeting: VoiceTurnResultDTO = {
+      personaId,
       reply: firstMsg?.content ?? FREE_CONVERSATION_STARTER,
       feedback: [],
+      contextualVocabulary,
       encouragement:
         typeof meta["encouragement"] === "string"
           ? meta["encouragement"]
@@ -356,27 +404,26 @@ export class VoiceService {
     dto: VoiceTurnTextInput,
   ): Promise<WsTurnResultPayload> {
     return this.quotaService.withTurnLock(dto.sessionId, async () => {
-      const { session, profile, history, quota } = await this.prepareTurnContext(
-        userId,
-        dto.sessionId,
-      );
+      const { session, profile, history, quota, recurringMistakes } =
+        await this.prepareTurnContext(userId, dto.sessionId);
 
-      const level = (session.level ?? (profile.proficiencyLevel === "UNKNOWN" ? "A1" : profile.proficiencyLevel)) as ProficiencyLevel;
+      const teaching = this.resolveTurnTeachingConfig(session, profile);
       const aiResponse = await this.tutorAI.generateTurnResponse({
         userMessage: dto.text,
-        learnerLevel: level,
-        topic: session.scenario ?? "English Conversation",
+        learnerLevel: teaching.level,
+        topic: teaching.topic,
         history: history.map((m): ConversationMessage => ({
           id: m.id,
           sender: m.role === "USER" ? "user" : "ai",
           content: m.content,
           timestamp: m.createdAt.toISOString(),
         })),
-        nativeLanguage: this.resolveAiLanguage(
-          profile.explanationLanguage,
-          profile.nativeLanguage,
-        ),
+        nativeLanguage: teaching.nativeLanguage,
         learnerName: profile.displayName,
+        personaId: teaching.personaId,
+        speakingSpeed: teaching.speakingSpeed,
+        scenarioSpec: teaching.scenarioSpec,
+        recurringMistakes,
       });
 
       const assistantSeq = await this.persistTurnMessages(
@@ -384,6 +431,7 @@ export class VoiceService {
         dto.text,
         { audioDurationSeconds: dto.audioDurationSeconds },
         aiResponse,
+        teaching.personaId,
       );
 
       const updatedQuota = await this.quotaService.getQuotaSummary(userId, session.startedAt);
@@ -395,8 +443,10 @@ export class VoiceService {
 
       return {
         sessionId: session.id,
+        personaId: teaching.personaId,
         reply: aiResponse.reply,
         feedback: aiResponse.feedback as VoiceFeedbackItemDTO[],
+        contextualVocabulary: aiResponse.contextualVocabulary ?? [],
         ...(aiResponse.score !== undefined ? { score: aiResponse.score } : {}),
         encouragement: aiResponse.encouragement,
         followUpQuestion: aiResponse.suggestedFollowUpQuestion,
@@ -415,26 +465,24 @@ export class VoiceService {
     }
 
     return this.quotaService.withTurnLock(dto.sessionId, async () => {
-      const { session, profile, history } = await this.prepareTurnContext(
+      const { session, profile, history, recurringMistakes } = await this.prepareTurnContext(
         userId,
         dto.sessionId,
       );
 
-      const level = (session.level ?? (profile.proficiencyLevel === "UNKNOWN" ? "A1" : profile.proficiencyLevel)) as ProficiencyLevel;
-      const topic = session.scenario ?? "English Conversation";
-      const nativeLanguage = this.resolveAiLanguage(
-        profile.explanationLanguage,
-        profile.nativeLanguage,
-      );
+      const teaching = this.resolveTurnTeachingConfig(session, profile);
 
       const audioResult = await this.scenarioAI.processAudioTurn({
         audioBase64: dto.audioBase64,
         mimeType: dto.mimeType,
-        scenario: topic,
+        scenario: teaching.topic,
+        personaId: teaching.personaId,
         learner: {
           name: profile.displayName,
-          level,
-          nativeLanguage,
+          level: teaching.level,
+          nativeLanguage: teaching.nativeLanguage,
+          speakingSpeed: teaching.speakingSpeed,
+          recurringMistakes,
         },
         messageHistory: history.map((m) => ({
           role: m.role === "USER" ? ("user" as const) : ("model" as const),
@@ -455,16 +503,20 @@ export class VoiceService {
           audioClear = true;
           finalResponse = await this.tutorAI.generateTurnResponse({
             userMessage: hint,
-            learnerLevel: level,
-            topic,
+            learnerLevel: teaching.level,
+            topic: teaching.topic,
             history: history.map((m): ConversationMessage => ({
               id: m.id,
               sender: m.role === "USER" ? "user" : "ai",
               content: m.content,
               timestamp: m.createdAt.toISOString(),
             })),
-            nativeLanguage,
+            nativeLanguage: teaching.nativeLanguage,
             learnerName: profile.displayName,
+            personaId: teaching.personaId,
+            speakingSpeed: teaching.speakingSpeed,
+            scenarioSpec: teaching.scenarioSpec,
+            recurringMistakes,
           });
         } else {
           audioClear = false;
@@ -499,6 +551,7 @@ export class VoiceService {
           audioClear,
         },
         finalResponse,
+        teaching.personaId,
       );
 
       const updatedQuota = await this.quotaService.getQuotaSummary(userId, session.startedAt);
@@ -510,10 +563,12 @@ export class VoiceService {
 
       return {
         sessionId: session.id,
+        personaId: teaching.personaId,
         audioClear,
         ...(audioClear && transcript ? { userTranscript: transcript } : {}),
         reply: finalResponse.reply,
         feedback: finalResponse.feedback as VoiceFeedbackItemDTO[],
+        contextualVocabulary: finalResponse.contextualVocabulary ?? [],
         ...(finalResponse.score !== undefined ? { score: finalResponse.score } : {}),
         encouragement: finalResponse.encouragement,
         followUpQuestion: finalResponse.suggestedFollowUpQuestion,
@@ -660,16 +715,17 @@ export class VoiceService {
       throw new VoiceQuotaExceededException(endedPayload);
     }
 
-    const [profile, history] = await Promise.all([
+    const [profile, history, recurringMistakes] = await Promise.all([
       this.prisma.userProfile.findUniqueOrThrow({ where: { userId } }),
       this.prisma.message.findMany({
         where: { sessionId },
         orderBy: { sequence: "asc" },
         take: 24,
       }),
+      this.loadRecurringMistakes(userId),
     ]);
 
-    return { session, profile, history, quota };
+    return { session, profile, history, quota, recurringMistakes };
   }
 
   private async persistTurnMessages(
@@ -677,6 +733,7 @@ export class VoiceService {
     userContent: string,
     userMetadata: Record<string, unknown>,
     aiResponse: TutorTurnResponse,
+    personaId?: TutorPersonaId,
   ): Promise<number> {
     return this.prisma.$transaction(async (tx) => {
       const current = await tx.voiceSession.findUnique({
@@ -716,7 +773,9 @@ export class VoiceService {
           language: "en",
           content: aiResponse.reply,
           metadata: {
+            ...(personaId ? { personaId } : {}),
             feedback: aiResponse.feedback,
+            contextualVocabulary: aiResponse.contextualVocabulary ?? [],
             score: aiResponse.score,
             encouragement: aiResponse.encouragement,
             followUpQuestion: aiResponse.suggestedFollowUpQuestion,
@@ -776,6 +835,170 @@ export class VoiceService {
     return code === "hi" || code === "hindi" ? "hindi" : "english";
   }
 
+  private async loadRecurringMistakes(userId: string): Promise<string[]> {
+    const rows = await this.prisma.learningMemory.findMany({
+      where: {
+        userId,
+        memoryType: { in: ["recurring_mistake", "grammar_weakness", "mistake"] },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 4,
+      select: { content: true },
+    });
+
+    const mistakes: string[] = [];
+    for (const row of rows) {
+      if (typeof row.content === "string" && row.content.trim()) {
+        mistakes.push(row.content.trim());
+        continue;
+      }
+      const rec = this.asRecord(row.content);
+      const text = rec["description"] ?? rec["pattern"] ?? rec["mistake"];
+      if (typeof text === "string" && text.trim()) {
+        mistakes.push(text.trim());
+      }
+    }
+    return mistakes;
+  }
+
+  private parseValidPersonaId(raw: unknown): TutorPersonaId | undefined {
+    if (typeof raw === "string" && Object.prototype.hasOwnProperty.call(TUTOR_PERSONAS, raw)) {
+      return raw as TutorPersonaId;
+    }
+    return undefined;
+  }
+
+  private extractSessionTeachingContext(rawMetadata: unknown): {
+    personaId?: TutorPersonaId;
+    category?: string;
+    scenarioSpec?: PromptScenarioSpec;
+  } {
+    const meta = this.asRecord(rawMetadata);
+    const personaId = this.parseValidPersonaId(meta["personaId"]);
+    const category =
+      typeof meta["lessonCategory"] === "string" && meta["lessonCategory"].trim().length > 0
+        ? meta["lessonCategory"].trim()
+        : undefined;
+
+    const aiRole =
+      typeof meta["roleplayRole"] === "string" ? meta["roleplayRole"].trim() : undefined;
+    const learnerRole =
+      typeof meta["learnerRole"] === "string" ? meta["learnerRole"].trim() : undefined;
+    const objectives = Array.isArray(meta["objectives"])
+      ? meta["objectives"].filter((x): x is string => typeof x === "string")
+      : undefined;
+    const keyPhrases = Array.isArray(meta["keyPhrases"])
+      ? meta["keyPhrases"].filter((x): x is string => typeof x === "string")
+      : undefined;
+    const vocabulary = Array.isArray(meta["vocabulary"])
+      ? meta["vocabulary"].flatMap((item) => {
+          const rec = this.asRecord(item);
+          const word = typeof rec["word"] === "string" ? rec["word"].trim() : "";
+          const meaning = typeof rec["meaning"] === "string" ? rec["meaning"].trim() : "";
+          if (!word || !meaning) return [];
+          return [
+            {
+              word,
+              meaning,
+              ...(typeof rec["hindiMeaning"] === "string"
+                ? { hindiMeaning: rec["hindiMeaning"] }
+                : {}),
+              ...(typeof rec["example"] === "string" ? { example: rec["example"] } : {}),
+            },
+          ];
+        })
+      : undefined;
+
+    const hasSpec =
+      Boolean(aiRole) ||
+      Boolean(learnerRole) ||
+      Boolean(objectives && objectives.length > 0) ||
+      Boolean(keyPhrases && keyPhrases.length > 0) ||
+      Boolean(vocabulary && vocabulary.length > 0);
+
+    return {
+      ...(personaId ? { personaId } : {}),
+      ...(category ? { category } : {}),
+      ...(hasSpec
+        ? {
+            scenarioSpec: {
+              ...(aiRole ? { aiRole } : {}),
+              ...(learnerRole ? { learnerRole } : {}),
+              ...(objectives && objectives.length > 0 ? { objectives } : {}),
+              ...(keyPhrases && keyPhrases.length > 0 ? { keyPhrases } : {}),
+              ...(vocabulary && vocabulary.length > 0 ? { vocabulary } : {}),
+            },
+          }
+        : {}),
+    };
+  }
+
+  private resolveTurnTeachingConfig(
+    session: { level: string | null; scenario: string | null; metadata: unknown },
+    profile: {
+      proficiencyLevel: string;
+      explanationLanguage: string;
+      nativeLanguage: string;
+      speakingSpeed: string;
+    },
+  ): {
+    level: ProficiencyLevel;
+    topic: string;
+    nativeLanguage: string;
+    speakingSpeed: SpeakingSpeed;
+    personaId: TutorPersonaId;
+    scenarioSpec?: PromptScenarioSpec;
+  } {
+    const level = (
+      session.level ??
+      (profile.proficiencyLevel === "UNKNOWN" ? "A1" : profile.proficiencyLevel)
+    ) as ProficiencyLevel;
+    const topic = session.scenario ?? "English Conversation";
+    const teachingCtx = this.extractSessionTeachingContext(session.metadata);
+    const persona = resolvePersonaForScenario({
+      personaId: teachingCtx.personaId,
+      category: teachingCtx.category,
+      topic,
+      level,
+    });
+
+    return {
+      level,
+      topic,
+      nativeLanguage: this.resolveAiLanguage(
+        profile.explanationLanguage,
+        profile.nativeLanguage,
+      ),
+      speakingSpeed: (profile.speakingSpeed as SpeakingSpeed | undefined) ?? "NORMAL",
+      personaId: persona.id,
+      scenarioSpec: teachingCtx.scenarioSpec,
+    };
+  }
+
+  private extractContextualVocabulary(raw: unknown): ContextualVocabularyItemDTO[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.flatMap((item) => {
+      const rec = this.asRecord(item);
+      const word = typeof rec["word"] === "string" ? rec["word"].trim() : "";
+      const meaning = typeof rec["meaning"] === "string" ? rec["meaning"].trim() : "";
+      const example = typeof rec["example"] === "string" ? rec["example"].trim() : "";
+      if (!word || !meaning || !example) return [];
+      return [
+        {
+          word,
+          meaning,
+          example,
+          ...(typeof rec["partOfSpeech"] === "string"
+            ? { partOfSpeech: rec["partOfSpeech"] }
+            : {}),
+          ...(typeof rec["hindiMeaning"] === "string"
+            ? { hindiMeaning: rec["hindiMeaning"] }
+            : {}),
+        },
+      ];
+    });
+  }
+
   private asRecord(val: unknown): Record<string, unknown> {
     return val && typeof val === "object" && !Array.isArray(val)
       ? (val as Record<string, unknown>)
@@ -796,6 +1019,7 @@ export class VoiceService {
     metadata: unknown;
   }): VoiceSessionDTO {
     const meta = this.asRecord(s.metadata);
+    const personaId = this.parseValidPersonaId(meta["personaId"]);
     return {
       id: s.id,
       userId: s.userId,
@@ -803,6 +1027,7 @@ export class VoiceService {
       provider: s.provider,
       scenario: s.scenario,
       level: (s.level as ProficiencyLevel | null) ?? null,
+      ...(personaId ? { personaId } : {}),
       durationSeconds: s.durationSeconds,
       startedAt: s.startedAt?.toISOString() ?? null,
       endedAt: s.endedAt?.toISOString() ?? null,

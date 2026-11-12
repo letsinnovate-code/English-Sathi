@@ -5,11 +5,20 @@ import {
   ListLessonsQuerySchema,
   type ListLessonsQueryInput,
 } from "@english-sathi/validation";
-import type { LessonDetailDTO, LessonsListDTO } from "@english-sathi/shared-types";
+import type {
+  LessonDetailDTO,
+  LessonsListDTO,
+  TutorPersonaDTO,
+} from "@english-sathi/shared-types";
 
 @Controller("lessons")
 export class LessonsController {
   constructor(private readonly lessonsService: LessonsService) {}
+
+  @Get("personas")
+  listPersonas(): TutorPersonaDTO[] {
+    return this.lessonsService.listPersonas();
+  }
 
   @Get()
   listLessons(
