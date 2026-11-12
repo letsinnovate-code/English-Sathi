@@ -10,6 +10,8 @@ import { RedisModule } from "./infrastructure/redis/redis.module";
 import { AuthModule } from "./modules/auth/auth.module";
 import { UsersModule } from "./modules/users/users.module";
 import { DashboardModule } from "./modules/dashboard/dashboard.module";
+import { LessonsModule } from "./modules/lessons/lessons.module";
+import { VoiceModule } from "./modules/voice/voice.module";
 import { JwtAuthGuard } from "./common/guards/jwt-auth.guard";
 import { RolesGuard } from "./common/guards/roles.guard";
 
@@ -26,6 +28,8 @@ import { RolesGuard } from "./common/guards/roles.guard";
     AuthModule,
     UsersModule,
     DashboardModule,
+    LessonsModule,
+    VoiceModule,
   ],
   controllers: [AppController],
   providers: [

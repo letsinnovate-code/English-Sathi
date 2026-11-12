@@ -233,6 +233,8 @@ export interface SessionEvaluationDTO {
 
 /** Result of one AI-processed voice turn returned over WebSocket. */
 export interface VoiceTurnResultDTO {
+  /** Transcript of what the learner said (returned for audio turns when available). */
+  userTranscript?: string;
   /** The AI tutor's textual reply (also synthesised as speech by the client). */
   reply: string;
   /** Pedagogical feedback items for the user's utterance. */
@@ -247,6 +249,14 @@ export interface VoiceTurnResultDTO {
   messageSequence: number;
   /** Updated quota after the turn. */
   quota: VoiceQuotaSummaryDTO;
+}
+
+/** Response returned by POST /api/v1/voice/sessions. */
+export interface CreateVoiceSessionResponseDTO {
+  session: VoiceSessionDTO;
+  openingGreeting: VoiceTurnResultDTO;
+  quota: VoiceQuotaSummaryDTO;
+  wsNamespace: "/voice";
 }
 
 /** One feedback item within a voice turn result. */
